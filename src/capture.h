@@ -17,7 +17,7 @@ public:
 // sources are monitor compositions, never off-screen windows.
 class WaylandCapture {
 public:
-    explicit WaylandCapture(QString outputName);
+    explicit WaylandCapture(QString outputName, QString waylandDisplay = {});
     ~WaylandCapture();
     WaylandCapture(const WaylandCapture&) = delete;
     WaylandCapture& operator=(const WaylandCapture&) = delete;

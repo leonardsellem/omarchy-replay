@@ -114,7 +114,7 @@ def process_view(pid, binary):
         return None
 
 
-def focus_existing(dataset, binary, require_indexing=False):
+def focus_existing(dataset, binary, require_indexing=False, toggle=False):
     try:
         result = subprocess.run(['hyprctl', '-j', 'clients'], capture_output=True, timeout=1, check=False)
         if result.returncode or len(result.stdout) > 1024 * 1024:
@@ -135,6 +135,18 @@ def focus_existing(dataset, binary, require_indexing=False):
             continue
         if require_indexing and not existing[1]:
             raise RuntimeError('Close the existing Replay window and reopen this trial to resume indexing.')
+        if toggle:
+            try:
+                active = subprocess.run(['hyprctl', '-j', 'activewindow'], capture_output=True, timeout=1, check=False)
+                current = json.loads(active.stdout) if active.returncode == 0 and len(active.stdout) < 65536 else {}
+                if current.get('address') == address and current.get('pid') == client.get('pid'):
+                    closed = subprocess.run(['hyprctl', 'dispatch', f'hl.dsp.window.close({{ window = "address:{address}" }})'],
+                                            capture_output=True, timeout=1, check=False)
+                    if closed.returncode != 0:
+                        raise RuntimeError('Replay could not dismiss its viewer.')
+                    return True
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                raise RuntimeError('Replay could not check its focused viewer.') from error
         # Hyprland's Lua dispatch is current; retain compatibility with older releases.
         # Only the validated hexadecimal address enters the fixed Lua expression.
         commands = [
@@ -152,7 +164,7 @@ def focus_existing(dataset, binary, require_indexing=False):
     return False
 
 
-def launch_viewer(binary, dataset, config):
+def launch_viewer(binary, dataset, config, toggle=False):
     dataset = Path(dataset).expanduser().resolve()
     if not (dataset / 'index.sqlite').is_file():
         raise RuntimeError('This history has no saved index yet. Finish a trial before opening it.')
@@ -163,6 +175,6 @@ def launch_viewer(binary, dataset, config):
     # The independent service now owns indexing. A plain existing viewer is
     # sufficient, and closing it cannot stop background processing.
     command = [str(binary), 'view', '--dir', str(dataset)]
-    if focus_existing(dataset, binary):
+    if focus_existing(dataset, binary, toggle=True) if toggle else focus_existing(dataset, binary):
         return 0
     return subprocess.call(command, env=dict(os.environ, OMP_THREAD_LIMIT='1'))

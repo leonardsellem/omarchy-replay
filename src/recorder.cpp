@@ -16,6 +16,7 @@
 #include <QThread>
 #include <sys/file.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <omp.h>
@@ -169,6 +170,25 @@ struct Statement {
         return value ? QString::fromUtf8(reinterpret_cast<const char *>(value)) : QString();
     }
 };
+
+quint64 metadataNumber(Database &db, const QString &key) {
+    Statement query(db, "SELECT value FROM metadata WHERE key=?"); query.bind(1, key);
+    if (!query.next()) return 0;
+    return query.string(0).toULongLong();
+}
+
+void setMetadata(Database &db, const QString &key, quint64 value) {
+    Statement statement(db, "INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+    statement.bind(1, key); statement.bind(2, QString::number(value)); statement.next();
+}
+
+void adjustMetadata(Database &db, const QString &key, qint64 change) {
+    if (change == 0) return;
+    const quint64 old = metadataNumber(db, key);
+    if ((change < 0 && quint64(-change) > old) || (change > 0 && old > quint64(std::numeric_limits<qint64>::max() - change)))
+        error("History accounting is inconsistent");
+    setMetadata(db, key, change < 0 ? old - quint64(-change) : old + quint64(change));
+}
 
 QString safeMediaPath(const QString &directory, const QString &relative) {
     const QString base = QFileInfo(directory).canonicalFilePath();
@@ -462,6 +482,189 @@ QByteArray encodeWebP(const QImage &image) {
     WebPPictureFree(&picture); WebPMemoryWriterClear(&writer);
     if (!success) error("Lossless WebP encoding failed");
     return result;
+}
+
+class Descriptor {
+public:
+    int fd = -1;
+    explicit Descriptor(int value) : fd(value) {}
+    ~Descriptor() { if (fd >= 0) ::close(fd); }
+    Descriptor(const Descriptor &) = delete;
+    Descriptor &operator=(const Descriptor &) = delete;
+};
+
+QString privateHistoryDirectory(const QString &directory) {
+    const QFileInfo root(directory);
+    if (root.isSymLink() || !root.isDir() || root.ownerId() != getuid()) error("History must be a private local directory");
+    const QString absolute = root.absoluteFilePath();
+    for (const auto &name : {QString("index.sqlite"), QString("index.sqlite-wal"), QString("index.sqlite-shm"), QString("media"), QString("staging")}) {
+        const QFileInfo entry(QDir(absolute).filePath(name));
+        if (entry.isSymLink() || (entry.exists() && entry.ownerId() != getuid()))
+            error("History contains an unsafe database or media path");
+        if (entry.exists() && name.startsWith("index.sqlite")) {
+            struct stat status{};
+            if (::lstat(QFile::encodeName(entry.absoluteFilePath()).constData(), &status) != 0 ||
+                !S_ISREG(status.st_mode) || status.st_nlink != 1)
+                error("History database must be a private regular file with a single link");
+        }
+    }
+    if (!QFileInfo(QDir(absolute).filePath("index.sqlite")).isFile() || !QFileInfo(QDir(absolute).filePath("media")).isDir())
+        error("History database or media directory is missing");
+    return absolute;
+}
+
+QString mediaName(const QString &relative) {
+    static const QRegularExpression pattern("^media/(frame-[0-9]{8,19}\\.webp)$");
+    const auto match = pattern.match(relative);
+    if (!match.hasMatch()) error("History media path is outside its managed original-image namespace");
+    return match.captured(1);
+}
+
+class PrivateMedia {
+    Descriptor root;
+    Descriptor media;
+public:
+    explicit PrivateMedia(const QString &directory)
+        : root(::open(QFile::encodeName(directory).constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)),
+          media(root.fd < 0 ? -1 : ::openat(root.fd, "media", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) {
+        if (root.fd < 0 || media.fd < 0) error("Cannot open private history media directory");
+    }
+    qint64 size(const QString &relative, bool missingAllowed = false) const {
+        const QByteArray name = QFile::encodeName(mediaName(relative));
+        struct stat status{};
+        if (fstatat(media.fd, name.constData(), &status, AT_SYMLINK_NOFOLLOW) != 0) {
+            if (missingAllowed && errno == ENOENT) return -1;
+            error("History original is missing or unreadable");
+        }
+        if (!S_ISREG(status.st_mode) || status.st_uid != getuid() || status.st_nlink != 1)
+            error("History original is not a private regular file");
+        return status.st_size;
+    }
+    void write(const QString &relative, const QByteArray &bytes) const {
+        const QByteArray name = QFile::encodeName(mediaName(relative));
+        Descriptor file(::openat(media.fd, name.constData(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
+        if (file.fd < 0) error("Cannot create a new history original without replacing existing data");
+        qsizetype written = 0;
+        while (written < bytes.size()) {
+            const auto result = ::write(file.fd, bytes.constData() + written, bytes.size() - written);
+            if (result < 0 && errno == EINTR) continue;
+            if (result <= 0) error("Cannot write history original");
+            written += result;
+        }
+        if (::fsync(file.fd) != 0 || ::fsync(media.fd) != 0) error("Cannot synchronize history original");
+    }
+    qint64 remove(const QString &relative) const {
+        const auto bytes = size(relative, true);
+        if (bytes < 0) return -1; // A crash may have occurred after unlink and before its receipt.
+        const QByteArray name = QFile::encodeName(mediaName(relative));
+        if (::unlinkat(media.fd, name.constData(), 0) != 0) {
+            if (errno == ENOENT) return -1;
+            error("Cannot remove retired history original");
+        }
+        if (::fsync(media.fd) != 0) error("Cannot synchronize retired history original");
+        return bytes;
+    }
+};
+
+void requireHistory(Database &db) {
+    if (metadataNumber(db, "history_version") != 1 || metadataNumber(db, "archive_first") != 1)
+        error("This operation requires an initialized persistent archive-first history");
+}
+
+quint64 historyDiskBytes(Database &db, const QString &directory) {
+    quint64 bytes = metadataNumber(db, "history_media_bytes");
+    for (const char *suffix : {"", "-wal", "-shm"}) bytes += std::max<qint64>(0, QFileInfo(dbPath(directory) + suffix).size());
+    return bytes;
+}
+
+qint64 allocateHistoryId(Database &db, const QString &key) {
+    const auto next = metadataNumber(db, key);
+    if (next == 0 || next >= quint64(std::numeric_limits<qint64>::max())) error("History identifier space is exhausted or invalid");
+    setMetadata(db, key, next + 1);
+    return qint64(next);
+}
+
+void initializeHistory(Database &db, const QString &directory) {
+    if (metadataNumber(db, "history_version") == 1) { requireHistory(db); return; }
+    if (metadataNumber(db, "archive_first") != 1 || metadataNumber(db, "schema_version") != 2)
+        error("Only an archive-first WebP dataset can become persistent history");
+    {
+        Statement incompatible(db, "SELECT 1 FROM frames WHERE codec<>'webp' OR segment_id IS NOT NULL OR "
+                                  "(source_path<>'' AND source_path<>path) LIMIT 1");
+        if (incompatible.next()) error("Persistent history contains incompatible capture records");
+    }
+    if (!QDir(directory + "/staging").entryList(QDir::Files | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot).isEmpty())
+        error("Persistent archive-first history must not contain staged video sources");
+    PrivateMedia media(directory);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+        db.exec("CREATE TABLE history_media(path TEXT PRIMARY KEY,bytes INTEGER NOT NULL CHECK(bytes>=0),"
+                "state TEXT NOT NULL CHECK(state IN('writing','live','retired')));"
+                "CREATE INDEX history_media_state ON history_media(state,path);"
+                "CREATE UNIQUE INDEX history_frame_path ON frames(path);"
+                "CREATE INDEX observation_frame_time ON observations(frame_id,timestamp_ms,id);"
+                "CREATE TABLE history_gaps(id INTEGER PRIMARY KEY AUTOINCREMENT,start_ms INTEGER NOT NULL,end_ms INTEGER NOT NULL,reason TEXT NOT NULL);"
+                "CREATE INDEX history_gap_end ON history_gaps(end_ms,id)");
+        quint64 total = 0, next = 1;
+        // One migration scan inventories old prototype originals and orphans.
+        // Future captures reserve every filename/byte before creating a file,
+        // so crash recovery and per-frame accounting need no directory scan.
+        const QDir folder(directory + "/media");
+        for (const auto &name : folder.entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot)) {
+            const QString path = "media/" + name;
+            const auto size = media.size(path);
+            bool valid = false;
+            const auto number = name.mid(6, name.size() - 11).toULongLong(&valid);
+            if (!valid || number >= quint64(std::numeric_limits<qint64>::max())) error("History archive filename is invalid");
+            next = std::max(next, number + 1);
+            total += quint64(size);
+            Statement insert(db, "INSERT INTO history_media(path,bytes,state) VALUES(?,?,CASE WHEN EXISTS(SELECT 1 FROM frames WHERE path=?) THEN 'live' ELSE 'retired' END)");
+            insert.bind(1, path); insert.bind(2, size); insert.bind(3, path); insert.next();
+        }
+        Statement frames(db, "SELECT COALESCE(MAX(id),0),COUNT(*) FROM frames"); frames.next();
+        setMetadata(db, "history_next_frame", std::max(next, quint64(frames.number(0)) + 1));
+        setMetadata(db, "history_frames", frames.number(1));
+        Statement observations(db, "SELECT COALESCE(MAX(id),0),COUNT(*) FROM observations"); observations.next();
+        setMetadata(db, "history_next_observation", quint64(observations.number(0)) + 1);
+        setMetadata(db, "history_observations", observations.number(1));
+        setMetadata(db, "history_media_bytes", total);
+        Statement missing(db, "SELECT 1 FROM frames LEFT JOIN history_media USING(path) WHERE history_media.path IS NULL LIMIT 1");
+        if (missing.next()) error("Cannot resume history with missing originals");
+        setMetadata(db, "history_version", 1);
+        db.exec("COMMIT");
+    } catch (...) { sqlite3_exec(db.handle, "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+}
+
+void collectRetiredMedia(Database &db, const QString &directory, int limit, HistoryMaintenanceResult &result) {
+    PrivateMedia media(directory);
+    QVector<QPair<QString, qint64>> retired;
+    {
+        Statement rows(db, "SELECT path,bytes FROM history_media WHERE state='retired' ORDER BY path LIMIT ?");
+        rows.bind(1, limit);
+        while (rows.next()) retired.append({rows.string(0), rows.number(1)});
+    }
+    if (retired.isEmpty()) return;
+    for (const auto &entry : retired) {
+        {
+            Statement used(db, "SELECT 1 FROM frames WHERE path=? UNION ALL "
+                               "SELECT 1 FROM frames INDEXED BY held_sources WHERE source_path=? AND source_path<>'' LIMIT 1");
+            used.bind(1, entry.first); used.bind(2, entry.first);
+            if (used.next()) error("Refusing to remove a history original that is still referenced");
+        }
+        // Retired names are never reused. Unlink/fsync need not hold the writer
+        // transaction; a crash leaves a durable receipt to finish next time.
+        const auto reclaimed = media.remove(entry.first);
+        if (reclaimed >= 0) { ++result.filesRemoved; result.bytesReclaimed += quint64(reclaimed); }
+    }
+    db.exec("BEGIN IMMEDIATE");
+    try {
+        for (const auto &entry : retired) {
+            Statement erase(db, "DELETE FROM history_media WHERE path=? AND state='retired'");
+            erase.bind(1, entry.first); erase.next();
+            if (sqlite3_changes(db.handle) == 1) adjustMetadata(db, "history_media_bytes", -entry.second);
+        }
+        db.exec("COMMIT");
+    } catch (...) { sqlite3_exec(db.handle, "ROLLBACK", nullptr, nullptr, nullptr); throw; }
 }
 } // namespace
 
@@ -933,6 +1136,7 @@ struct OcrEngine {
 struct Recorder::Impl : OcrEngine {
     ImageFingerprint lastCaptureFingerprint;
     std::unique_ptr<Database> db;
+    QFile captureLock;
     QProcess encoder;
     QByteArray encoderErrors;
     qint64 previousTimestamp = -1, lastFrameId = 0;
@@ -960,6 +1164,7 @@ struct Recorder::Impl : OcrEngine {
         if (!codecs.contains(options.codec)) error("Unsupported codec: " + options.codec);
         if (options.archiveFirst && (!options.deferredOcr || !options.ocr || options.codec != "webp"))
             error("Archive-first retention requires deferred OCR and the lossless WebP codec");
+        if (options.resume && !options.archiveFirst) error("Persistent capture requires archive-first WebP history");
         if (options.deferredOcr && (!options.ocr || options.maxPendingFrames < 0 || options.maxPendingFrames > 1024 ||
             options.maxPendingBytes < 1 || (!options.archiveFirst && options.maxPendingBytes >= options.maxDiskBytes - IndexReserve - MiB)))
             error("Deferred OCR requires OCR enabled and pending limits that leave space for archive and index");
@@ -969,17 +1174,35 @@ struct Recorder::Impl : OcrEngine {
             options.ocrMaxWallMs < 1 || options.ocrMaxWallMs > 60000)
             error("Invalid OCR CPU budget or maximum wall time");
         const QFileInfo existing(options.directory);
-        if (existing.isSymLink() || (existing.exists() && (!existing.isDir() ||
-            !QDir(options.directory).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot).isEmpty())))
+        const bool nonempty = existing.exists() &&
+            !QDir(options.directory).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot).isEmpty();
+        if (existing.isSymLink() || (existing.exists() && !existing.isDir()) || (!options.resume && nonempty))
             error("Refusing to overwrite existing dataset; choose a new or empty directory");
+        const bool reopen = options.resume && QFileInfo(dbPath(options.directory)).exists();
+        if (reopen) privateHistoryDirectory(options.directory);
+        else if (options.resume && existing.exists() &&
+                 !QDir(options.directory).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot).isEmpty())
+            error("Existing directory is not a resumable history");
         if (!QDir().mkpath(QDir(options.directory).filePath("media"))) error("Cannot create private dataset directory");
         options.directory = QFileInfo(options.directory).absoluteFilePath();
         if (!QFile::setPermissions(options.directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner) ||
             !QFile::setPermissions(QDir(options.directory).filePath("media"), QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner))
             error("Cannot restrict dataset directory permissions");
+        const QString capturePath = QDir(options.directory).filePath(".capture.lock");
+        const int descriptor = ::open(QFile::encodeName(capturePath).constData(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (descriptor < 0) error("Cannot open history capture lease");
+        if (!captureLock.open(descriptor, QIODevice::ReadWrite, QFileDevice::AutoCloseHandle)) {
+            ::close(descriptor); error("Cannot own history capture lease");
+        }
+        struct stat captureStat{};
+        if (fstat(descriptor, &captureStat) != 0 || !S_ISREG(captureStat.st_mode) || captureStat.st_uid != getuid() ||
+            captureStat.st_nlink != 1 || flock(descriptor, LOCK_EX | LOCK_NB) != 0)
+            error("Another recorder owns this history, or its capture lease is unsafe");
         lifetime.start();
-        db = std::make_unique<Database>(dbPath(options.directory), true);
+        db = std::make_unique<Database>(dbPath(options.directory), !reopen, true);
         QFile::setPermissions(dbPath(options.directory), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        if (!reopen) {
+        if (options.resume) db->exec("PRAGMA auto_vacuum=INCREMENTAL");
         db->exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2048;"
                  "PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576; PRAGMA foreign_keys=ON;"
                  "CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
@@ -995,6 +1218,12 @@ struct Recorder::Impl : OcrEngine {
                  "CREATE TABLE observations(id INTEGER PRIMARY KEY,timestamp_ms INTEGER NOT NULL,frame_id INTEGER NOT NULL REFERENCES frames(id));"
                  "CREATE INDEX observation_time ON observations(timestamp_ms);"
                  "CREATE VIRTUAL TABLE frame_text USING fts5(text,tokenize='unicode61');");
+        } else {
+            db->exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048;"
+                     "PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576; PRAGMA foreign_keys=ON");
+            if (metadataNumber(*db, "archive_first") != 1 || metadataNumber(*db, "schema_version") != 2)
+                error("Existing dataset is not compatible archive-first history");
+        }
         if (options.deferredOcr) {
             db->exec("PRAGMA synchronous=FULL");
             if (!QDir().mkpath(QDir(options.directory).filePath("staging"))) error("Cannot create original-image staging directory");
@@ -1005,8 +1234,16 @@ struct Recorder::Impl : OcrEngine {
         for (const auto &item : {QPair<QString, quint64>{"max_disk_bytes", options.maxDiskBytes},
                                 {"max_pending_bytes", options.deferredOcr ? options.maxPendingBytes : 0},
                                 {"archive_first", options.archiveFirst ? 1 : 0}}) {
-            Statement metadata(*db, "INSERT INTO metadata(key,value) VALUES(?,?)");
-            metadata.bind(1, item.first); metadata.bind(2, QString::number(item.second)); metadata.next();
+            setMetadata(*db, item.first, item.second);
+        }
+        if (options.resume) {
+            initializeHistory(*db, options.directory);
+            // The capture lease proves any unfinished publication belongs to
+            // an earlier process. Its reserved bytes remain counted until GC.
+            db->exec("UPDATE history_media SET state='retired' WHERE state='writing' AND "
+                     "NOT EXISTS(SELECT 1 FROM frames WHERE frames.path=history_media.path)");
+            HistoryMaintenanceResult recovered;
+            collectRetiredMedia(*db, options.directory, 128, recovered);
         }
         if (options.ocr && !options.deferredOcr) initializeOcr();
         checkDisk();
@@ -1017,6 +1254,7 @@ struct Recorder::Impl : OcrEngine {
     }
 
     quint64 bytesOnDisk() const {
+        if (options.resume) return historyDiskBytes(*db, options.directory);
         quint64 size = sealedMediaBytes + directoryBytes(QDir(options.directory).filePath("staging"));
         if (!segmentPath.isEmpty()) size += std::max<qint64>(0, QFileInfo(QDir(options.directory).filePath(segmentPath)).size());
         for (const char *suffix : {"", "-wal", "-shm"})
@@ -1156,8 +1394,29 @@ struct Recorder::Impl : OcrEngine {
     }
 
     void observation(qint64 timestampMs, qint64 frameId) {
+        if (options.resume) {
+            Statement query(*db, "INSERT INTO observations(id,timestamp_ms,frame_id) VALUES(?,?,?)");
+            query.bind(1, allocateHistoryId(*db, "history_next_observation"));
+            query.bind(2, timestampMs); query.bind(3, frameId); query.next();
+            adjustMetadata(*db, "history_observations", 1);
+            return;
+        }
         Statement query(*db, "INSERT INTO observations(timestamp_ms,frame_id) VALUES(?,?)");
         query.bind(1, timestampMs); query.bind(2, frameId); query.next();
+    }
+
+    qint64 reserveArchive(qint64 bytes, QString &path) {
+        db->exec("BEGIN IMMEDIATE");
+        try {
+            checkDisk(quint64(bytes) + IndexReserve);
+            const auto id = allocateHistoryId(*db, "history_next_frame");
+            path = QString("media/frame-%1.webp").arg(id, 8, 10, QChar('0'));
+            Statement reservation(*db, "INSERT INTO history_media(path,bytes,state) VALUES(?,?,'writing')");
+            reservation.bind(1, path); reservation.bind(2, bytes); reservation.next();
+            adjustMetadata(*db, "history_media_bytes", bytes);
+            db->exec("COMMIT");
+            return id;
+        } catch (...) { sqlite3_exec(db->handle, "ROLLBACK", nullptr, nullptr, nullptr); throw; }
     }
 
     bool queueHasRoom(quint64 bytes) {
@@ -1182,6 +1441,7 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
     if (d->finished || d->failed) error("Recorder is already stopped");
     QString unpublishedArchive;
     quint64 unpublishedArchiveBytes = 0;
+    QString reservedArchive;
     try {
         if (input.isNull() || input.width() > 16384 || input.height() > 16384 ||
             qint64(input.width()) * input.height() > 32 * 1024 * 1024)
@@ -1207,12 +1467,17 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
             d->db->exec("BEGIN IMMEDIATE");
             Statement query(*d->db, "UPDATE frames SET last_timestamp_ms=?,observation_count=observation_count+1 WHERE id=?");
             query.bind(1, timestampMs); query.bind(2, d->lastFrameId); query.next();
+            if (sqlite3_changes(d->db->handle) == 0) {
+                d->db->exec("ROLLBACK");
+                breakContinuity(); // Retention deleted the last shared original.
+            } else {
             d->observation(timestampMs, d->lastFrameId);
             d->db->exec("COMMIT");
             ++d->duplicates; ++d->observations; d->previousTimestamp = timestampMs;
             d->indexWallMs += timer.nsecsElapsed() / 1e6; d->indexCpuMs += cpuMs() - cpuStart;
             result.duplicate = true; result.frameId = d->lastFrameId;
             return result;
+            }
         }
         QByteArray original;
         if (d->options.deferredOcr) {
@@ -1251,24 +1516,29 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
         QString sourcePath;
         const QString ocrState = d->options.deferredOcr ? "pending" : d->options.ocr ? "ready" : "disabled";
         qint64 frameIndex = 0;
+        qint64 reservedFrameId = 0;
         timer.restart(); cpuStart = cpuMs();
         if (d->options.codec == "webp") {
             const QByteArray bytes = original.isEmpty() ? encodeWebP(image) : original;
+            if (d->options.resume) {
+                reservedFrameId = d->reserveArchive(bytes.size(), path);
+                reservedArchive = path;
+            }
             if (d->options.archiveFirst) {
                 // Encoding happens outside the write transaction. Serialize the
                 // final budget check, durable publication and row commit against
                 // OCR publication so they cannot spend the same disk headroom.
                 d->db->exec("BEGIN IMMEDIATE");
             }
-            d->checkDisk(bytes.size() + IndexReserve);
-            path = QString("media/frame-%1.webp").arg(d->retained + 1, 8, 10, QChar('0'));
+            d->checkDisk((d->options.resume ? 0 : bytes.size()) + IndexReserve);
+            if (!d->options.resume) path = QString("media/frame-%1.webp").arg(d->retained + 1, 8, 10, QChar('0'));
             const QString absolutePath = QDir(d->options.directory).filePath(path);
             if (d->options.archiveFirst) {
                 if (QFileInfo::exists(absolutePath)) error("Refusing to replace an existing archive image");
                 unpublishedArchive = absolutePath;
             }
-            writeImageFile(absolutePath, bytes, d->options.deferredOcr);
-            d->sealedMediaBytes += bytes.size();
+            if (d->options.resume) PrivateMedia(d->options.directory).write(path, bytes);
+            else { writeImageFile(absolutePath, bytes, d->options.deferredOcr); d->sealedMediaBytes += bytes.size(); }
             if (d->options.archiveFirst) unpublishedArchiveBytes = bytes.size();
             if (d->options.deferredOcr) sourcePath = path;
         } else {
@@ -1284,11 +1554,17 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
         d->mediaWallMs += result.mediaMs; d->mediaCpuMs += cpuMs() - cpuStart;
         timer.restart(); cpuStart = cpuMs();
         if (!d->options.archiveFirst) d->db->exec("BEGIN IMMEDIATE");
-        Statement insert(*d->db, "INSERT INTO frames(timestamp_ms,last_timestamp_ms,segment_id,frame_index,path,codec,width,height,text,ocr_state,source_path,source_bytes) VALUES(?,?,NULLIF(?,0),?,?,?,?,?,?,?,?,?)");
-        insert.bind(1, timestampMs); insert.bind(2, timestampMs); insert.bind(3, d->segmentId); insert.bind(4, frameIndex);
-        insert.bind(5, path); insert.bind(6, d->options.codec); insert.bind(7, image.width()); insert.bind(8, image.height()); insert.bind(9, text);
-        insert.bind(10, ocrState); insert.bind(11, sourcePath); insert.bind(12, original.size()); insert.next();
+        Statement insert(*d->db, "INSERT INTO frames(id,timestamp_ms,last_timestamp_ms,segment_id,frame_index,path,codec,width,height,text,ocr_state,source_path,source_bytes) VALUES(NULLIF(?,0),?,?,NULLIF(?,0),?,?,?,?,?,?,?,?,?)");
+        insert.bind(1, reservedFrameId); insert.bind(2, timestampMs); insert.bind(3, timestampMs); insert.bind(4, d->segmentId); insert.bind(5, frameIndex);
+        insert.bind(6, path); insert.bind(7, d->options.codec); insert.bind(8, image.width()); insert.bind(9, image.height()); insert.bind(10, text);
+        insert.bind(11, ocrState); insert.bind(12, sourcePath); insert.bind(13, original.size()); insert.next();
         d->lastFrameId = sqlite3_last_insert_rowid(d->db->handle);
+        if (d->options.resume) {
+            Statement publish(*d->db, "UPDATE history_media SET state='live' WHERE path=? AND state='writing'");
+            publish.bind(1, path); publish.next();
+            if (sqlite3_changes(d->db->handle) != 1) error("History original lost its publication reservation");
+            adjustMetadata(*d->db, "history_frames", 1);
+        }
         if (ocrState == "ready") {
             Statement fts(*d->db, "INSERT INTO frame_text(rowid,text) VALUES(?,?)");
             fts.bind(1, d->lastFrameId); fts.bind(2, text); fts.next();
@@ -1298,6 +1574,7 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
         d->db->exec("COMMIT");
         unpublishedArchive.clear();
         unpublishedArchiveBytes = 0;
+        reservedArchive.clear();
         d->indexWallMs += timer.nsecsElapsed() / 1e6; d->indexCpuMs += cpuMs() - cpuStart;
         d->lastCaptureFingerprint = currentFingerprint;
         if (d->ocr) d->lastFingerprint = std::move(currentOcrFingerprint);
@@ -1315,11 +1592,27 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
         sqlite3_exec(d->db->handle, "ROLLBACK", nullptr, nullptr, nullptr);
         // Only this attempt's file can be unreferenced. Never remove a committed
         // original, including when a later bookkeeping check fails.
-        if (!unpublishedArchive.isEmpty() && QFile::remove(unpublishedArchive))
+        if (d->options.resume && !reservedArchive.isEmpty()) {
+            try {
+                Statement retire(*d->db, "UPDATE history_media SET state='retired' WHERE path=? AND state='writing'");
+                retire.bind(1, reservedArchive); retire.next();
+                HistoryMaintenanceResult cleanup;
+                collectRetiredMedia(*d->db, d->options.directory, 1, cleanup);
+            } catch (...) {} // The durable reservation makes the next recovery safe.
+        } else if (!d->options.resume && !unpublishedArchive.isEmpty() && QFile::remove(unpublishedArchive))
             d->sealedMediaBytes -= unpublishedArchiveBytes;
         if (d->encoder.state() != QProcess::NotRunning) { d->encoder.kill(); d->encoder.waitForFinished(1000); }
         throw;
     }
+}
+
+void Recorder::breakContinuity() {
+    d->lastCaptureFingerprint = {};
+    d->lastFrameId = 0;
+    d->lastFingerprint = {};
+    d->cachedLines.clear();
+    d->cachedGeometryComplete = false;
+    d->consecutivePartialFrames = 0;
 }
 
 void Recorder::finish() {
@@ -1331,6 +1624,7 @@ void Recorder::finish() {
         d->mediaWallMs += timer.nsecsElapsed() / 1e6; d->mediaCpuMs += cpuMs() - cpuStart;
         d->db->exec(d->options.deferredOcr ? "PRAGMA wal_checkpoint(PASSIVE)" : "PRAGMA wal_checkpoint(TRUNCATE)");
         d->finished = true;
+        d->captureLock.close();
     } catch (...) { d->failed = true; throw; }
 }
 
@@ -1376,11 +1670,6 @@ RecorderOptions workerOptions(const IndexerOptions &options) {
     return result;
 }
 
-quint64 metadataNumber(Database &db, const QString &key) {
-    Statement query(db, "SELECT value FROM metadata WHERE key=?"); query.bind(1, key);
-    if (!query.next()) return 0;
-    return query.string(0).toULongLong();
-}
 } // namespace
 
 struct Indexer::Impl : OcrEngine {
@@ -1624,6 +1913,13 @@ struct Indexer::Impl : OcrEngine {
     void checkIndexHeadroom(qsizetype textBytes, qsizetype geometryBytes) {
         const quint64 ceiling = metadataNumber(*db, "max_disk_bytes");
         if (!ceiling) error("Dataset does not declare an index disk budget");
+        const quint64 required = quint64(textBytes) * 8 + quint64(geometryBytes) * 2 + 256 * 1024;
+        if (metadataNumber(*db, "history_version") == 1) {
+            const auto used = historyDiskBytes(*db, options.directory);
+            if (used >= ceiling || required > ceiling - used)
+                error("Index disk headroom is exhausted; original evidence was retained");
+            return;
+        }
         quint64 used = 0;
         QHash<QString, quint64> reservations;
         const quint64 staged = directoryBytes(QDir(options.directory).filePath("staging"));
@@ -1643,7 +1939,6 @@ struct Indexer::Impl : OcrEngine {
         used += activeSegment ? std::max(staged, metadataNumber(*db, "max_pending_bytes")) : staged;
         for (const char *suffix : {"", "-wal", "-shm"})
             used += std::max<qint64>(0, QFileInfo(dbPath(options.directory) + suffix).size());
-        const quint64 required = quint64(textBytes) * 8 + quint64(geometryBytes) * 2 + 256 * 1024;
         if (used >= ceiling || required > ceiling - used)
             error("Index disk headroom is exhausted; original evidence was retained");
     }
@@ -1841,6 +2136,151 @@ QJsonObject Indexer::statsJSON() const {
     return stats;
 }
 
+namespace {
+HistoryMaintenanceResult removeHistoryObservations(const QString &requestedDirectory, qint64 from, qint64 until,
+                                                    int maxObservations, int maxFiles) {
+    if (from < 0 || until < from || maxObservations < 1 || maxObservations > 10000 || maxFiles < 1 || maxFiles > 1024)
+        error("Invalid bounded history maintenance range or batch size");
+    const QString directory = privateHistoryDirectory(requestedDirectory);
+    Database db(dbPath(directory), false, true);
+    sqlite3_busy_timeout(db.handle, 100);
+    requireHistory(db);
+    HistoryMaintenanceResult result;
+    try {
+        db.exec("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE");
+        QVector<qint64> observations;
+        QHash<qint64, qint64> affected;
+        {
+            Statement rows(db, "SELECT id,frame_id FROM observations WHERE timestamp_ms>=? AND timestamp_ms<? ORDER BY timestamp_ms,id LIMIT ?");
+            rows.bind(1, from); rows.bind(2, until); rows.bind(3, maxObservations);
+            while (rows.next()) { observations.append(rows.number(0)); ++affected[rows.number(1)]; }
+        }
+        for (const auto id : observations) {
+            Statement erase(db, "DELETE FROM observations WHERE id=?"); erase.bind(1, id); erase.next();
+        }
+        qint64 framesRemoved = 0;
+        for (auto it = affected.cbegin(); it != affected.cend(); ++it) {
+            bool survives = false;
+            {
+                Statement remaining(db, "SELECT 1 FROM observations WHERE frame_id=? LIMIT 1");
+                remaining.bind(1, it.key()); survives = remaining.next();
+            }
+            if (survives) {
+                Statement bounds(db, "UPDATE frames SET observation_count=observation_count-?,"
+                    "timestamp_ms=(SELECT timestamp_ms FROM observations WHERE frame_id=? ORDER BY timestamp_ms,id LIMIT 1),"
+                    "last_timestamp_ms=(SELECT timestamp_ms FROM observations WHERE frame_id=? ORDER BY timestamp_ms DESC,id DESC LIMIT 1) WHERE id=?");
+                bounds.bind(1, it.value()); bounds.bind(2, it.key()); bounds.bind(3, it.key()); bounds.bind(4, it.key()); bounds.next();
+            } else {
+                Statement retire(db, "UPDATE history_media SET state='retired' WHERE path=(SELECT path FROM frames WHERE id=?)");
+                retire.bind(1, it.key()); retire.next();
+                for (const char *sql : {"DELETE FROM frame_text WHERE rowid=?", "DELETE FROM frame_ocr_geometry WHERE frame_id=?",
+                                       "DELETE FROM index_requests WHERE frame_id=?"}) {
+                    Statement erase(db, sql); erase.bind(1, it.key()); erase.next();
+                }
+                // Reuse is optional on histories that have never enabled it.
+                {
+                    Statement reuse(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ocr_reuse'");
+                    if (reuse.next()) {
+                        Statement erase(db, "DELETE FROM ocr_reuse WHERE frame_id=?"); erase.bind(1, it.key()); erase.next();
+                    }
+                }
+                Statement erase(db, "DELETE FROM frames WHERE id=?"); erase.bind(1, it.key()); erase.next();
+                framesRemoved += sqlite3_changes(db.handle);
+            }
+        }
+        adjustMetadata(db, "history_observations", -observations.size());
+        adjustMetadata(db, "history_frames", -framesRemoved);
+        struct Gap { qint64 id, start, end; QString reason; };
+        QVector<Gap> gaps;
+        {
+            Statement rows(db, "SELECT id,start_ms,end_ms,reason FROM history_gaps WHERE start_ms<? AND end_ms>? ORDER BY end_ms,id LIMIT ?");
+            rows.bind(1, until); rows.bind(2, from); rows.bind(3, maxObservations);
+            while (rows.next()) gaps.append({rows.number(0), rows.number(1), rows.number(2), rows.string(3)});
+        }
+        qint64 gapsRemoved = 0;
+        for (const auto &gap : gaps) {
+            if (gap.start >= from && gap.end <= until) {
+                Statement erase(db, "DELETE FROM history_gaps WHERE id=?"); erase.bind(1, gap.id); erase.next(); ++gapsRemoved;
+            } else if (gap.start < from && gap.end > until) {
+                Statement left(db, "UPDATE history_gaps SET end_ms=? WHERE id=?"); left.bind(1, from); left.bind(2, gap.id); left.next();
+                Statement right(db, "INSERT INTO history_gaps(start_ms,end_ms,reason) VALUES(?,?,?)");
+                right.bind(1, until); right.bind(2, gap.end); right.bind(3, gap.reason); right.next();
+            } else {
+                Statement clip(db, "UPDATE history_gaps SET start_ms=?,end_ms=? WHERE id=?");
+                clip.bind(1, gap.start < from ? gap.start : until);
+                clip.bind(2, gap.start < from ? from : gap.end); clip.bind(3, gap.id); clip.next();
+            }
+        }
+        db.exec("COMMIT");
+        result.observationsRemoved = observations.size(); result.framesRemoved = framesRemoved; result.gapsRemoved = gapsRemoved;
+        // Recover capture intents only while holding its idle lease. The active
+        // recorder owns its current intent between reservation and publication.
+        Descriptor idle(::open(QFile::encodeName(directory + "/.capture.lock").constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+        if (idle.fd >= 0 && flock(idle.fd, LOCK_EX | LOCK_NB) == 0)
+            db.exec("UPDATE history_media SET state='retired' WHERE state='writing' AND NOT EXISTS(SELECT 1 FROM frames WHERE frames.path=history_media.path)");
+        collectRetiredMedia(db, directory, maxFiles, result);
+        // Incremental vacuum is bounded and effective on new persistent stores.
+        // Existing prototype databases retain their page format and reuse freed pages.
+        db.exec("PRAGMA incremental_vacuum(32); PRAGMA wal_checkpoint(PASSIVE)");
+        Statement remaining(db, "SELECT EXISTS(SELECT 1 FROM observations WHERE timestamp_ms>=? AND timestamp_ms<?) OR "
+            "EXISTS(SELECT 1 FROM history_gaps WHERE start_ms<? AND end_ms>?) OR EXISTS(SELECT 1 FROM history_media WHERE state='retired')");
+        remaining.bind(1, from); remaining.bind(2, until); remaining.bind(3, until); remaining.bind(4, from);
+        remaining.next(); result.more = remaining.number(0) != 0;
+    } catch (const SqliteError &exception) {
+        if (!sqlite3_get_autocommit(db.handle)) db.exec("ROLLBACK");
+        if (!exception.contention()) throw;
+        result.busy = true; result.more = true;
+    } catch (...) { sqlite3_exec(db.handle, "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+    result.diskBytes = historyDiskBytes(db, directory);
+    return result;
+}
+} // namespace
+
+HistoryMaintenanceResult maintainHistory(const QString &directory, qint64 expireBeforeMs, int maxObservations, int maxFiles) {
+    return removeHistoryObservations(directory, 0, expireBeforeMs, maxObservations, maxFiles);
+}
+
+HistoryMaintenanceResult deleteHistoryRange(const QString &directory, qint64 fromInclusiveMs, qint64 toExclusiveMs,
+                                           int maxObservations, int maxFiles) {
+    return removeHistoryObservations(directory, fromInclusiveMs, toExclusiveMs, maxObservations, maxFiles);
+}
+
+QJsonObject historyUsage(const QString &requestedDirectory) {
+    const QString directory = privateHistoryDirectory(requestedDirectory);
+    Database db(dbPath(directory), false);
+    requireHistory(db);
+    db.exec("BEGIN");
+    QJsonObject result{{"directory", directory}, {"disk_bytes", double(historyDiskBytes(db, directory))},
+        {"media_bytes", double(metadataNumber(db, "history_media_bytes"))},
+        {"observations", qint64(metadataNumber(db, "history_observations"))},
+        {"frames", qint64(metadataNumber(db, "history_frames"))}, {"first_timestamp_ms", QJsonValue::Null},
+        {"last_timestamp_ms", QJsonValue::Null}};
+    {
+        Statement first(db, "SELECT timestamp_ms FROM observations ORDER BY timestamp_ms,id LIMIT 1");
+        if (first.next()) result["first_timestamp_ms"] = first.number(0);
+    }
+    {
+        Statement last(db, "SELECT timestamp_ms FROM observations ORDER BY timestamp_ms DESC,id DESC LIMIT 1");
+        if (last.next()) result["last_timestamp_ms"] = last.number(0);
+    }
+    Statement retired(db, "SELECT COUNT(*) FROM history_media WHERE state='retired'");
+    retired.next(); result["cleanup_pending"] = retired.number(0);
+    db.exec("COMMIT");
+    return result;
+}
+
+void recordGap(const QString &requestedDirectory, qint64 startMs, qint64 endMs, const QString &reason) {
+    if (startMs < 0 || endMs < startMs || reason.trimmed().isEmpty() || reason.toUtf8().size() > 256)
+        error("Invalid history gap interval or reason");
+    if (startMs == endMs) return;
+    const QString directory = privateHistoryDirectory(requestedDirectory);
+    Database db(dbPath(directory), false, true);
+    requireHistory(db);
+    db.exec("PRAGMA synchronous=FULL");
+    Statement insert(db, "INSERT INTO history_gaps(start_ms,end_ms,reason) VALUES(?,?,?)");
+    insert.bind(1, startMs); insert.bind(2, endMs); insert.bind(3, reason.trimmed()); insert.next();
+}
+
 QVector<FrameRecord> listFrames(const QString &directory, int limit, int offset) {
     Database db(dbPath(directory), false);
     const QByteArray sql = frameColumns(db) + "ORDER BY f.timestamp_ms,f.id LIMIT ? OFFSET ?";
@@ -1878,7 +2318,7 @@ SearchPage searchFramePage(const QString &directory, const QString &text, int li
         result.timeline.lastTimestampMs = summary.number(2);
         firstId = summary.number(3); lastId = summary.number(4); lastStart = summary.number(5);
     }
-    if (!result.totalMatches) { db.exec("COMMIT"); return result; }
+    if (!result.totalMatches) { result.offset = 0; db.exec("COMMIT"); return result; }
     const int pageSize = std::clamp(limit, 1, 1000);
     if (anchorFrameId > 0) {
         // A newly indexed earlier frame can shift every later ordinal. Resolve
@@ -1896,6 +2336,10 @@ SearchPage searchFramePage(const QString &directory, const QString &text, int li
             result.selectedRow = int(ordinal % pageSize);
         }
     }
+    // Expiration can remove complete pages between refreshes. Keep the cursor
+    // on a remaining page even when its former anchor was also deleted.
+    if (result.offset >= result.totalMatches)
+        result.offset = ((result.totalMatches - 1) / pageSize) * pageSize;
     {
         const QByteArray sql = frameColumns(db) +
             "JOIN frame_text ON frame_text.rowid=f.id WHERE frame_text MATCH ? ORDER BY f.timestamp_ms,f.id LIMIT ? OFFSET ?";

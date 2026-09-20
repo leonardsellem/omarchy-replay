@@ -72,6 +72,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=ROOT / 'build/replay')
     parser.add_argument('--dir', type=Path, required=True)
+    parser.add_argument('--capture-exclusions', action='store_true',
+                        help='Verify generated app/title capture masks and removing a custom mask.')
     args = parser.parse_args()
     binary = str(args.binary.resolve(strict=True))
     result_dir = args.dir.resolve()
@@ -213,6 +215,12 @@ hl.config({
             outputs()
             run(['hyprctl', 'dismissnotify', '-1'], env)
             install_cmd = [sys.executable, str(ROOT / 'scripts/install_viewer_exclusion.py'), '--config-home', str(config_home)]
+            if args.capture_exclusions:
+                policy = base / 'replay.toml'
+                policy.write_text('[exclusions]\napps=[]\n')
+                install_cmd = [sys.executable, str(ROOT / 'scripts/install_capture_exclusions.py'),
+                               '--config-home', str(config_home), '--config', str(policy),
+                               '--instance', env['HYPRLAND_INSTANCE_SIGNATURE']]
             report['installation'] = json.loads(run(install_cmd, env))
             repeated = json.loads(run(install_cmd, env))
             if repeated['changed']:
@@ -267,6 +275,14 @@ hl.config({
             reopened = launch([binary, 'view', '--dir', str(source)], 'viewer-reopened')
             wait_for(lambda: window(reopened.pid), 'Reopened viewer did not map')
             check('first-capture-after-reopen', [reopened.pid], output='REPLAY-OTHER')
+            if args.capture_exclusions:
+                policy.write_text('[exclusions]\napps=[]\n[[exclusions.windows]]\n'
+                                  'app_id="omarchy-replay-fixture"\ntitle_regex="."\n')
+                report['custom_mask_installation'] = json.loads(run(install_cmd, env))
+                check('custom-app-title-mask', [fixture.pid])
+                policy.write_text('[exclusions]\napps=[]\n')
+                run(install_cmd, env)
+                check('custom-mask-removal-restores-fixture', [], fixture.pid)
             report['passed'] = True
         except BaseException as error:
             report['error'] = str(error)

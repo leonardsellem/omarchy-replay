@@ -1,8 +1,19 @@
-# Omarchy Replay documentation
+# Documentation
 
-Project documents live in this `docs/` directory. Start with the [repository README](../README.md) for setup and the prototype status.
+Start with the [repository README](../README.md) for features, installation and first use.
 
-- [Product roadmap](roadmap.md): background recording service, shared history, native controls, `~/.config/oma-rewind`, configurable app/window exclusions, settings, and integration with the user's coding agents. An explicit installer provides a native compositor rule to exclude Replay's viewer.
+## Current guides
+
+- [Recording and configuration](background-recording.md): display selection, storage, CPU settings, exclusions, keyboard controls and service diagnostics.
+- [Coding agent guide](agent-guide.md): supported CLI commands, drop-in operation context, configuration edits, resource tuning and evidence retrieval.
+- [Architecture](architecture.md): process model, archives, OCR/search, CPU scheduling, retention, lifecycle, exclusions and recovery.
+- [Roadmap](roadmap.md): implemented behavior, ordinary-use validation and future work.
+- [Shared recorder implementation record](background-recording-implementation.md): the dated verification report for shared history, service controls, retention and capture policy.
+
+The current setup uses `omarchy-replay` for configuration, data, state and the user service. Older reports retain the names and defaults used for their experiments. Use the current guides for commands and configuration; use the reports below for their measured findings.
+
+## Decisions, research and earlier experiments
+
 - [Practical agent use-case research](screenpipe-agent-use-case-research.md): Screenpipe-inspired information retrieval and screen evidence for the user's coding agent; tool details to discuss at that milestone. Subsequent tasks belong to the agent and its instructions.
 - [Living exploration](omarchy-agent-exploration.md): product direction, use cases, decisions, and open questions.
 - [Interaction proposal](omarchy-recall-interaction.md): Rewind-inspired recall adapted to native keyboard-driven Omarchy use.
@@ -33,5 +44,3 @@ Project documents live in this `docs/` directory. Start with the [repository REA
 - [Feasibility results](feasibility-results.md): measured codec, memory, CPU, OCR, and foreground findings, including unmet targets.
 - [Performance iteration 1](performance-iteration-1.md): incremental OCR, fewer pixel copies, allocator cleanup, and optional CPU pacing, with correctness and measured tradeoffs.
 - [Capture and indexing separation](capture-indexing-iteration.md): single-monitor recommendation, bounded deferred OCR, pending-image recall, and measured coverage/resource costs.
-
-Current status: the local prototype has been exercised with synthetic content and offline copies of authorized retained images. New personal trials default to adaptive indexing at 40% of one core while active, 50% for idle/requested catch-up and 10% during sustained CPU saturation, with an optional verified 60% worker ceiling. Saved histories preserve their previous settings. Selected moments remain prioritized while older jobs progress. Exact whole-frame OCR reuse is implemented but opt-in; this saved evening session had no eligible whole-screen repeats. An independent saved-history service now survives viewer closure and releases its OCR child when caught up; pause and stop persist across reopening. The explicit lossless archive option separates retention from OCR backlog admission, with higher disk use. Fixed scheduling and default video compression remain available. The engine comparison keeps current Tesseract because neither tested alternative improves the real-screen CPU bottleneck without other costs. High-resolution memory, sustained OCR capacity, small-text accuracy, foreground latency, rolling retention and unattended recording still need work before all-day product use.

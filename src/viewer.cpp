@@ -1,12 +1,33 @@
 #include "viewer.h"
+#include "agent_prompt.h"
 #include "recorder.h"
 #include "index_service.h"
+#include "replay_config.h"
+#include "recording_service.h"
 
 #include <QApplication>
-#include <QAction>
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QComboBox>
+#include <QDesktopServices>
+#include <QFileDialog>
+#include <QJsonDocument>
+#include <QProcess>
+#include <QUrl>
+#include <QVariantAnimation>
+#include <QDoubleSpinBox>
+#include <QSpinBox>
+#include <QCheckBox>
+#include <QFormLayout>
+#include <QTabWidget>
+#include <QPlainTextEdit>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QInputDialog>
+#include <QMessageBox>
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
@@ -76,6 +97,7 @@ ReplayColors theme(QWidget* widget) {
     palette.setColor(QPalette::Base, colors.background);
     palette.setColor(QPalette::WindowText, colors.foreground);
     palette.setColor(QPalette::Text, colors.foreground);
+    palette.setColor(QPalette::PlaceholderText, colors.muted);
     palette.setColor(QPalette::ButtonText, colors.foreground);
     palette.setColor(QPalette::Highlight, colors.accent);
     palette.setColor(QPalette::HighlightedText, colors.background);
@@ -91,8 +113,15 @@ ReplayColors theme(QWidget* widget) {
     widget->setFont(font);
     widget->setStyleSheet(QString(R"(
         QWidget { color: %1; }
-        QLineEdit { background: %2; border: 1px solid %3; padding: 8px 12px; selection-background-color: %4; selection-color: %5; }
-        QLineEdit:focus { border-color: %4; }
+        QLineEdit, QComboBox { background: %2; border: 1px solid %3; padding: 8px 12px; selection-background-color: %4; selection-color: %5; }
+        QLineEdit:focus, QComboBox:focus { border-color: %4; }
+        QComboBox QAbstractItemView { background: %5; selection-background-color: %4; selection-color: %5; }
+        QAbstractSpinBox, QPlainTextEdit, QTableWidget { background: %5; border: 1px solid %3; padding: 4px; }
+        QAbstractSpinBox:focus, QPlainTextEdit:focus, QTableWidget:focus { border-color: %4; }
+        QTabWidget::pane { border: none; }
+        QTabBar::tab { background: transparent; color: %6; padding: 9px 12px; border-bottom: 2px solid transparent; }
+        QTabBar::tab:selected { color: %1; border-bottom-color: %4; }
+        QHeaderView::section { background: %2; color: %6; border: none; padding: 5px; }
         QPushButton { background: transparent; border: 1px solid transparent; padding: 5px 8px; }
         QPushButton:hover, QPushButton:checked { background: %2; }
         QPushButton:focus { border-color: %4; }
@@ -155,7 +184,7 @@ public:
         setWidget(canvas_);
         setFocusPolicy(Qt::StrongFocus);
     }
-    void setImage(const QImage& image) { canvas_->image = image; render(); }
+    void setImage(const QImage& image) { canvas_->image = image; setProperty("hasImage", !image.isNull()); render(); }
     void setHighlights(const QVector<QRect>& boxes) { canvas_->highlights = boxes; canvas_->update(); }
     void toggleHighlights() { canvas_->showHighlights = !canvas_->showHighlights; canvas_->update(); }
     void setFit(bool fit) { fit_ = fit; setProperty("fit", fit); render(); }
@@ -182,6 +211,13 @@ public:
         setFixedHeight(56);
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
+        marker_.setDuration(160);
+        marker_.setStartValue(4.5);
+        marker_.setEndValue(3.);
+        marker_.setEasingCurve(QEasingCurve::OutCubic);
+        connect(&marker_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+            markerRadius_ = value.toDouble(); update();
+        });
     }
     void setOverview(const TimelineOverview& overview) { overview_ = overview; update(); }
     void setMatches(const TimelineOverview& matches) {
@@ -192,6 +228,7 @@ public:
     }
     std::function<void(qint64)> activateMatch;
     void setMoment(qint64 moment) {
+        if (moment_ && moment_ != moment && isVisible()) { marker_.stop(); marker_.start(); }
         moment_ = moment;
         setAccessibleDescription(QDateTime::fromMSecsSinceEpoch(moment).toString("dddd MMMM d HH:mm:ss"));
         const QSignalBlocker blocker(this);
@@ -232,7 +269,7 @@ protected:
         p.setPen(QPen(colors_.foreground, 1));
         p.drawLine(cursor, 4, cursor, 31);
         p.setBrush(colors_.foreground);
-        p.drawEllipse(QPointF(cursor, y), 3, 3);
+        p.drawEllipse(QPointF(cursor, y), markerRadius_, markerRadius_);
         p.setPen(colors_.muted);
         p.drawText(QRect(left, 35, width()/2-12, 20), Qt::AlignLeft,
             QDateTime::fromMSecsSinceEpoch(overview_.firstTimestampMs).toString("MMM d · HH:mm:ss"));
@@ -270,10 +307,13 @@ private:
     TimelineOverview overview_;
     QVector<TimelinePoint> hits_;
     qint64 moment_ = 0;
+    QVariantAnimation marker_;
+    double markerRadius_ = 3;
 };
 
 struct DecodedFrame {
     qint64 id = 0;
+    QString directory;
     QImage image;
     QString error;
 };
@@ -286,6 +326,7 @@ struct HistorySnapshot {
     qint64 currentId = 0;
     QJsonObject indexing;
     QJsonObject service, policy;
+    QJsonObject recording;
     QVector<FrameRecord> matches;
     TimelineOverview timeline;
     SearchPage page;
@@ -298,18 +339,384 @@ struct HistorySnapshot {
 
 struct TimelineNeighbors {
     qint64 id = 0;
+    QString directory;
     std::optional<FrameRecord> previous, next;
     QString error;
 };
 
 struct IndexingRequestResult {
     qint64 frameId = 0;
+    QString directory;
     bool catchUp = false;
     int changed = 0;
     QString error;
 };
 
 struct ServiceControlResult { QString action, error; QJsonObject status; };
+
+void removeButtonIcons(QWidget* widget) {
+    for (auto* button : widget->findChildren<QAbstractButton*>()) button->setIcon({});
+}
+
+QJsonArray connectedDisplays() {
+    QProcess process;
+    process.start("hyprctl", {"-j", "monitors"});
+    if (!process.waitForFinished(1000)) { process.kill(); process.waitForFinished(250); return {}; }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 || process.bytesAvailable() > 1024 * 1024) return {};
+    return QJsonDocument::fromJson(process.readAllStandardOutput()).array();
+}
+
+QString chooseItem(QWidget* parent, const QString& title, const QString& prompt, const QStringList& items, bool& accepted) {
+    QInputDialog dialog(parent);
+    theme(&dialog);
+    dialog.setWindowTitle(title); dialog.setLabelText(prompt);
+    dialog.setComboBoxItems(items); dialog.setComboBoxEditable(false);
+    removeButtonIcons(&dialog);
+    accepted = dialog.exec() == QDialog::Accepted;
+    return accepted ? dialog.textValue() : QString();
+}
+
+class SettingsDialog final : public QDialog {
+public:
+    explicit SettingsDialog(QWidget* parent, const QJsonObject& recordingStatus, std::function<QJsonArray()> displays) : QDialog(parent),
+        visibleWindows_(recordingStatus.value("visible_windows").toArray()),
+        compositorInstance_(recordingStatus.value("compositor_instance").toString(qEnvironmentVariable("HYPRLAND_INSTANCE_SIGNATURE"))) {
+        theme(this);
+        setObjectName("replaySettings");
+        setWindowTitle("Omarchy Replay settings");
+        resize(710, 700);
+        auto* layout = new QVBoxLayout(this);
+        auto* tabs = new QTabWidget;
+        tabs->setObjectName("settingsTabs");
+        layout->addWidget(tabs, 1);
+        auto* recording = new QWidget;
+        auto* form = new QFormLayout(recording);
+        form->setSpacing(12);
+        output_ = new QComboBox;
+        output_->setObjectName("settingOutput");
+        output_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        output_->setMinimumContentsLength(24);
+        output_->addItem("Choose a display", QString());
+        connect(output_, &QComboBox::activated, this, [this] { displayChosen_ = true; });
+        form->addRow("&Display", output_);
+        displayNote_ = new QLabel("Looking for connected displays…"); displayNote_->setWordWrap(true);
+        form->addRow(displayNote_);
+        interval_ = new QDoubleSpinBox;
+        interval_->setObjectName("settingInterval");
+        interval_->setRange(.25, 60); interval_->setSingleStep(.25); interval_->setSuffix(" seconds");
+        form->addRow("Capture &interval", interval_);
+        days_ = new QSpinBox;
+        days_->setObjectName("settingRetentionDays");
+        days_->setRange(1, 3650); days_->setSuffix(" days");
+        form->addRow("&Keep history", days_);
+        auto* retention = new QLabel("A moving window: older images, text and queued work are permanently deleted.");
+        retention->setWordWrap(true); form->addRow(retention);
+        disk_ = new QSpinBox; disk_->setObjectName("settingMaxDiskMiB");
+        disk_->setRange(64, 1048576); disk_->setSuffix(" MiB");
+        form->addRow("Disk &limit", disk_);
+        free_ = new QSpinBox; free_->setObjectName("settingMinFreeMiB");
+        free_->setRange(0, 1048576); free_->setSuffix(" MiB");
+        form->addRow("Leave &free", free_);
+        storage_ = new QLineEdit; storage_->setObjectName("settingStorageDirectory");
+        storage_->setReadOnly(true); storage_->setAccessibleName("History storage folder");
+        const QString viewedHistory = parent->property("historyDirectory").toString();
+        storage_->setText(recordingStatus.value("history_directory").toString(viewedHistory.isEmpty() ? replayPaths().historyDirectory : viewedHistory));
+        form->addRow("History &folder", storage_);
+        auto* folders = new QHBoxLayout;
+        auto* chooseFolder = new QPushButton("Choose folder…"); chooseFolder->setObjectName("chooseStorageDirectory");
+        auto* openFolder = new QPushButton("Open folder"); openFolder->setObjectName("openStorageDirectory");
+        auto* defaultFolder = new QPushButton("Use default"); defaultFolder->setObjectName("resetStorageDirectory");
+        folders->addWidget(chooseFolder); folders->addWidget(openFolder); folders->addWidget(defaultFolder); folders->addStretch();
+        form->addRow(folders);
+        auto* storageNote = new QLabel("Choose an empty folder on this computer or a mounted disk, or reopen an existing Replay archive. Changing folders keeps your old history in its original folder.");
+        storageNote->setWordWrap(true); form->addRow(storageNote);
+        connect(chooseFolder, &QPushButton::clicked, this, [this] {
+            const auto folder = QFileDialog::getExistingDirectory(this, "Choose history folder", storage_->text(),
+                QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
+            if (!folder.isEmpty()) { storageDirectory_ = QDir(folder).absolutePath(); storage_->setText(storageDirectory_); }
+        });
+        connect(openFolder, &QPushButton::clicked, this, [this] {
+            if (!QFileInfo(storage_->text()).isDir()) { error_->setText("This folder is unavailable. Check the selected location or reconnect its disk."); return; }
+            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(storage_->text()))) error_->setText("Could not open the history folder in your file manager.");
+        });
+        connect(defaultFolder, &QPushButton::clicked, this, [this] { storageDirectory_.clear(); storage_->setText(replayPaths().historyDirectory); });
+        login_ = new QCheckBox("Start at login");
+        login_->setObjectName("settingLoginStartup");
+        form->addRow(login_);
+        auto* explanation = new QLabel("Opening Replay never starts recording. Start recording explicitly in Controls. Manual pause and stop choices survive restarts.");
+        explanation->setWordWrap(true); form->addRow(explanation);
+        tabs->addTab(recording, "&Recording");
+
+        auto* resources = new QWidget;
+        auto* resourceForm = new QFormLayout(resources);
+        resourceForm->setSpacing(12);
+        auto* resourceIntro = new QLabel("The defaults favor a responsive desktop. If text indexing falls behind, your coding agent can inspect Replay's timing and CPU data and suggest a measured adjustment.");
+        resourceIntro->setWordWrap(true); resourceForm->addRow(resourceIntro);
+        auto* resourcePrompt = new QPushButton("Copy resources prompt"); resourcePrompt->setObjectName("copyResourcesPrompt");
+        resourceForm->addRow(resourcePrompt);
+        connect(resourcePrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Resources); });
+        const QVector<QPair<QString, QString>> budgets{{"While you work", "settingActiveCpu"}, {"When idle", "settingIdleCpu"},
+            {"For requested moments", "settingRequestCpu"}, {"When the computer is busy", "settingPressureCpu"}, {"Maximum worker CPU", "settingCpuCeiling"}};
+        for (const auto& entry : budgets) {
+            auto* spin = new QDoubleSpinBox;
+            spin->setObjectName(entry.second); spin->setRange(entry.second == "settingCpuCeiling" ? 0 : 1, 100);
+            spin->setSuffix("% of one core"); spin->setDecimals(1);
+            resourceForm->addRow(entry.first, spin); budgets_.append(spin);
+        }
+        idle_ = new QSpinBox; idle_->setObjectName("settingIdleSeconds");
+        idle_->setRange(1, 3600); idle_->setSuffix(" seconds");
+        resourceForm->addRow("Idle after", idle_);
+        auto* resourceNote = new QLabel("100% means one CPU core, regardless of how many your computer has. Lower values leave more CPU for other apps and can delay search. A zero maximum disables the worker's safety limit.");
+        resourceNote->setWordWrap(true); resourceForm->addRow(resourceNote);
+        tabs->addTab(resources, "&Resources");
+
+        auto* exclusions = new QWidget;
+        auto* exclusionLayout = new QVBoxLayout(exclusions);
+        auto* exclusionNote = new QLabel("Replay is always hidden from captured images. The Omarchy screensaver is always excluded and pauses capture while visible on the recorded display. Other matching windows also pause capture.");
+        exclusionNote->setWordWrap(true); exclusionLayout->addWidget(exclusionNote);
+        auto* exclusionPrompt = new QPushButton("Copy exclusions prompt"); exclusionPrompt->setObjectName("copyExclusionsPrompt");
+        exclusionLayout->addWidget(exclusionPrompt, 0, Qt::AlignLeft);
+        connect(exclusionPrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Exclusions); });
+        auto* exclusionHelp = new QLabel("Paste this prompt into your coding agent and describe what you want excluded. Or choose an app below and save.");
+        exclusionHelp->setWordWrap(true); exclusionLayout->addWidget(exclusionHelp);
+        auto* appLabel = new QLabel("Exact app identifiers, one per line");
+        apps_ = new QPlainTextEdit; apps_->setObjectName("settingExcludedApps");
+        apps_->setMaximumHeight(95); appLabel->setBuddy(apps_);
+        exclusionLayout->addWidget(appLabel); exclusionLayout->addWidget(apps_);
+        auto* chooseApp = new QPushButton("Choose visible app…");
+        chooseApp->setObjectName("chooseExcludedApp"); chooseApp->setEnabled(!visibleWindows_.isEmpty());
+        chooseApp->setToolTip("Choose from windows on the selected recording display");
+        exclusionLayout->addWidget(chooseApp, 0, Qt::AlignLeft);
+        connect(chooseApp, &QPushButton::clicked, this, [this] {
+            QStringList names;
+            for (const auto& entry : visibleWindows_) {
+                const auto window = entry.toObject();
+                const QString app = window.value("app_id").toString(window.value("initial_app_id").toString());
+                if (!app.isEmpty() && app != "omarchy-replay" && app != "org.omarchy.screensaver" && !names.contains(app)) names.append(app);
+            }
+            names.sort();
+            if (names.isEmpty()) return;
+            bool accepted = false;
+            const QString selected = chooseItem(this, "Exclude an app", "Pause capture whenever this app is visible", names, accepted);
+            if (accepted && !apps_->toPlainText().split('\n').contains(selected)) apps_->appendPlainText(selected);
+        });
+        windows_ = new QTableWidget(0, 3);
+        windows_->setObjectName("settingExcludedWindows");
+        windows_->setHorizontalHeaderLabels({"Exact app", "Title pattern", "Window address"});
+        windows_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        windows_->verticalHeader()->hide();
+        windows_->setCornerButtonEnabled(false);
+        windows_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        windows_->setAccessibleName("Window exclusion rules. Nonempty fields must all match.");
+        exclusionLayout->addWidget(windows_, 1);
+        auto* ruleActions = new QHBoxLayout;
+        auto* add = new QPushButton("&Add rule"); auto* remove = new QPushButton("&Remove rule");
+        auto* chooseWindow = new QPushButton("Choose visible window…");
+        chooseWindow->setObjectName("chooseExcludedWindow");
+        chooseWindow->setEnabled(!visibleWindows_.isEmpty() && !compositorInstance_.isEmpty());
+        add->setObjectName("addWindowExclusion"); remove->setObjectName("removeWindowExclusion");
+        ruleActions->addWidget(add); ruleActions->addWidget(remove); ruleActions->addWidget(chooseWindow); ruleActions->addStretch();
+        exclusionLayout->addLayout(ruleActions);
+        connect(add, &QPushButton::clicked, this, [this] {
+            const int row = windows_->rowCount(); windows_->insertRow(row);
+            for (int column = 0; column < 3; ++column) windows_->setItem(row, column, new QTableWidgetItem);
+            windows_->setCurrentCell(row, 0); windows_->editItem(windows_->item(row, 0));
+        });
+        connect(remove, &QPushButton::clicked, this, [this] { if (windows_->currentRow() >= 0) windows_->removeRow(windows_->currentRow()); });
+        connect(chooseWindow, &QPushButton::clicked, this, [this] {
+            QStringList labels;
+            QVector<QJsonObject> windows;
+            for (const auto& entry : visibleWindows_) {
+                const auto window = entry.toObject();
+                const QString app = window.value("app_id").toString(window.value("initial_app_id").toString());
+                if (app.isEmpty() || app == "omarchy-replay" || app == "org.omarchy.screensaver" || window.value("address").toString().isEmpty()) continue;
+                windows.append(window);
+                labels.append(app + " · " + window.value("title").toString().left(80) + " · " + window.value("address").toString());
+            }
+            if (labels.isEmpty()) return;
+            bool accepted = false;
+            const QString selected = chooseItem(this, "Exclude a window", "Choose a window for this desktop session", labels, accepted);
+            if (!accepted || labels.indexOf(selected) < 0) return;
+            const auto window = windows[labels.indexOf(selected)];
+            const int row = windows_->rowCount(); windows_->insertRow(row);
+            windows_->setItem(row, 0, new QTableWidgetItem(window.value("app_id").toString(window.value("initial_app_id").toString())));
+            windows_->setItem(row, 1, new QTableWidgetItem);
+            const QString addressText = window.value("address").toString().toLower();
+            auto* address = new QTableWidgetItem(addressText);
+            address->setData(Qt::UserRole, compositorInstance_); address->setData(Qt::UserRole + 1, addressText);
+            windows_->setItem(row, 2, address); windows_->setCurrentCell(row, 0);
+        });
+        auto* ruleNote = new QLabel("Title patterns use regular expressions. Nonempty fields must all match. Address rules last for this desktop session and also need an app or title; other windows matching that app/title are hidden from recordings.");
+        ruleNote->setWordWrap(true); exclusionLayout->addWidget(ruleNote);
+        tabs->addTab(exclusions, "&Exclusions");
+
+        error_ = new QLabel;
+        error_->setObjectName("settingsError"); error_->setWordWrap(true); error_->setTextFormat(Qt::PlainText);
+        layout->addWidget(error_);
+        promptNotice_ = new QLabel; promptNotice_->setObjectName("agentPromptNotice"); promptNotice_->setWordWrap(true);
+        layout->addWidget(promptNotice_);
+        auto* footer = new QHBoxLayout;
+        auto* setupPrompt = new QPushButton("Copy setup prompt"); setupPrompt->setObjectName("copySetupPrompt");
+        footer->addWidget(setupPrompt); footer->addStretch();
+        connect(setupPrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Setup); });
+        buttons_ = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+        buttons_->setObjectName("settingsButtons"); footer->addWidget(buttons_); layout->addLayout(footer);
+        removeButtonIcons(this);
+        connect(buttons_, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        connect(buttons_, &QDialogButtonBox::accepted, this, [this] { save(); });
+        try {
+            const auto resolved = resolveReplayConfig();
+            document_ = resolved.document;
+            configEditable_ = resolved.configError.isEmpty();
+            const auto& config = document_.config;
+            if (!config.output.isEmpty()) { output_->addItem(config.output + " · checking availability", config.output); output_->setCurrentIndex(1); }
+            interval_->setValue(config.intervalSeconds);
+            storageDirectory_ = config.storageDirectory; storage_->setText(replayHistoryDirectory(config));
+            days_->setValue(config.retentionDays); disk_->setValue(config.maxDiskMiB); free_->setValue(config.minFreeMiB);
+            login_->setChecked(config.loginStartup); idle_->setValue(config.idleSeconds);
+            const QVector<double> values{config.activeCpuPercent, config.idleCpuPercent, config.requestCpuPercent,
+                                         config.pressureCpuPercent, config.cpuCeilingPercent};
+            for (int i = 0; i < values.size(); ++i) budgets_[i]->setValue(values[i]);
+            auto editableApps = config.excludedApps;
+            editableApps.removeAll("omarchy-replay");
+            editableApps.removeAll("org.omarchy.screensaver");
+            apps_->setPlainText(editableApps.join('\n'));
+            for (const auto& rule : config.excludedWindows) {
+                const int row = windows_->rowCount(); windows_->insertRow(row);
+                windows_->setItem(row, 0, new QTableWidgetItem(rule.appId));
+                windows_->setItem(row, 1, new QTableWidgetItem(rule.titleRegex));
+                auto* address = new QTableWidgetItem(rule.address);
+                address->setData(Qt::UserRole, rule.compositorInstance);
+                address->setData(Qt::UserRole + 1, rule.address);
+                windows_->setItem(row, 2, address);
+            }
+            if (!configEditable_) {
+                error_->setText(resolved.configError + "\nShowing the last accepted settings. Copy the setup prompt to repair config.toml, then reopen Settings. Nothing has been changed.");
+                buttons_->button(QDialogButtonBox::Save)->setEnabled(false);
+            }
+        } catch (const std::exception& error) {
+            configEditable_ = false;
+            error_->setText(QString::fromUtf8(error.what()) + "\nCorrect config.toml and reopen Settings. Existing settings have not been changed.");
+            buttons_->button(QDialogButtonBox::Save)->setEnabled(false);
+        }
+        connect(&writer_, &QFutureWatcher<QString>::finished, this, [this] {
+            const QString error = writer_.result();
+            if (error.isEmpty()) accept();
+            else { error_->setText(error); buttons_->setEnabled(true); }
+        });
+        connect(&displays_, &QFutureWatcher<QJsonArray>::finished, this, [this] {
+            const QString selected = output_->currentData().toString();
+            const QSignalBlocker blocker(output_); output_->clear(); output_->addItem("Choose a display", QString());
+            for (const auto& value : displays_.result()) {
+                const auto monitor = value.toObject(); const auto name = monitor.value("name").toString();
+                if (name.isEmpty() || monitor.value("disabled").toBool()) continue;
+                QString label = name;
+                const QString model = monitor.value("model").toString();
+                if (!model.isEmpty()) label += " · " + model;
+                const int width = monitor.value("width").toInt(), height = monitor.value("height").toInt();
+                if (width > 0 && height > 0) label += QString(" · %1 × %2").arg(width).arg(height);
+                output_->addItem(label, name);
+            }
+            const int connected = output_->count() - 1;
+            if (!selected.isEmpty() && output_->findData(selected) < 0) output_->addItem(selected + " · disconnected", selected);
+            output_->setCurrentIndex(std::max(0, output_->findData(selected)));
+            displayNote_->setText(connected ? "Record one display. Replay keeps using the physical display you select."
+                : "No connected displays found. Your saved display is preserved; reconnect it and reopen Settings.");
+        });
+        displays_.setFuture(QtConcurrent::run([displays = std::move(displays)] { try { return displays(); } catch (...) { return QJsonArray(); } }));
+        output_->setFocus();
+    }
+    ~SettingsDialog() override { writer_.waitForFinished(); displays_.waitForFinished(); }
+protected:
+    void reject() override { if (!writer_.isRunning()) QDialog::reject(); }
+private:
+    void copyAgentPrompt(AgentPromptTopic topic) {
+        auto shown = document_.config;
+        shown.intervalSeconds = interval_->value();
+        shown.retentionDays = days_->value();
+        shown.maxDiskMiB = disk_->value(); shown.minFreeMiB = free_->value();
+        shown.activeCpuPercent = budgets_[0]->value(); shown.idleCpuPercent = budgets_[1]->value();
+        shown.requestCpuPercent = budgets_[2]->value(); shown.pressureCpuPercent = budgets_[3]->value();
+        shown.cpuCeilingPercent = budgets_[4]->value(); shown.idleSeconds = idle_->value();
+        const AgentPromptContext context{QCoreApplication::applicationFilePath(), replayPaths(),
+            replayHistoryDirectory(document_.config), shown, configEditable_};
+        QApplication::clipboard()->setText(configurationAgentPrompt(topic, context));
+        promptNotice_->setText("Prompt copied. Paste it into your coding agent and add your request.");
+        QTimer::singleShot(4000, this, [this] { promptNotice_->clear(); });
+    }
+    void save() {
+        if (!configEditable_) return;
+        auto config = document_.config;
+        config.output = output_->currentData().toString();
+        if (config.output != document_.config.output || displayChosen_) config.outputIdentity.clear();
+        config.storageDirectory = storageDirectory_;
+        config.intervalSeconds = interval_->value(); config.retentionDays = days_->value();
+        config.maxDiskMiB = disk_->value(); config.minFreeMiB = free_->value(); config.loginStartup = login_->isChecked();
+        config.activeCpuPercent = budgets_[0]->value(); config.idleCpuPercent = budgets_[1]->value();
+        config.requestCpuPercent = budgets_[2]->value(); config.pressureCpuPercent = budgets_[3]->value();
+        config.cpuCeilingPercent = budgets_[4]->value(); config.idleSeconds = idle_->value();
+        config.excludedApps = {"omarchy-replay", "org.omarchy.screensaver"};
+        for (const auto& line : apps_->toPlainText().split('\n'))
+            if (!line.trimmed().isEmpty() && !config.excludedApps.contains(line.trimmed())) config.excludedApps.append(line.trimmed());
+        config.excludedWindows.clear();
+        for (int row = 0; row < windows_->rowCount(); ++row) {
+            WindowExclusion rule;
+            const auto cell = [this, row](int column) { const auto* item = windows_->item(row, column); return item ? item->text().trimmed() : QString(); };
+            rule.appId = cell(0); rule.titleRegex = cell(1); rule.address = cell(2).toLower();
+            if (!rule.address.isEmpty()) {
+                const auto* address = windows_->item(row, 2);
+                rule.compositorInstance = address && address->data(Qt::UserRole + 1).toString() == rule.address
+                    ? address->data(Qt::UserRole).toString() : compositorInstance_;
+            }
+            config.excludedWindows.append(rule);
+        }
+        try { validateReplayConfig(config); }
+        catch (const std::exception& error) { error_->setText(QString::fromUtf8(error.what())); return; }
+        if (config.retentionDays < document_.config.retentionDays) {
+            QMessageBox confirmation(QMessageBox::NoIcon, "Shorten history retention?",
+                QString("Saving will permanently delete images, recognized text and queued work older than %1 days from your history. This cannot be undone.").arg(config.retentionDays),
+                QMessageBox::Save | QMessageBox::Cancel, this);
+            confirmation.setObjectName("confirmShorterRetention");
+            theme(&confirmation);
+            removeButtonIcons(&confirmation);
+            confirmation.setDefaultButton(QMessageBox::Cancel);
+            if (confirmation.exec() != QMessageBox::Save) return;
+        }
+        if (replayHistoryDirectory(config) != replayHistoryDirectory(document_.config)) {
+            QMessageBox confirmation(QMessageBox::NoIcon, "Change history folder?",
+                QString("Replay will use %1. Your existing history stays in its original folder. No images or text will be moved or deleted.")
+                    .arg(replayHistoryDirectory(config)), QMessageBox::Save | QMessageBox::Cancel, this);
+            confirmation.setObjectName("confirmStorageDirectory"); theme(&confirmation); removeButtonIcons(&confirmation);
+            confirmation.setDefaultButton(QMessageBox::Cancel);
+            if (confirmation.exec() != QMessageBox::Save) return;
+        }
+        buttons_->setEnabled(false); error_->setText("Saving settings…");
+        const QByteArray original = document_.original;
+        writer_.setFuture(QtConcurrent::run([config, original] {
+            try { saveReplayConfig(config, original); return QString(); }
+            catch (const std::exception& error) { return QString::fromUtf8(error.what()); }
+        }));
+    }
+    ReplayConfigDocument document_;
+    QComboBox* output_ = nullptr;
+    QLineEdit* storage_ = nullptr;
+    QString storageDirectory_;
+    bool displayChosen_ = false;
+    bool configEditable_ = false;
+    QLabel *displayNote_ = nullptr, *promptNotice_ = nullptr;
+    QDoubleSpinBox* interval_ = nullptr;
+    QSpinBox *days_ = nullptr, *disk_ = nullptr, *free_ = nullptr, *idle_ = nullptr;
+    QCheckBox* login_ = nullptr;
+    QVector<QDoubleSpinBox*> budgets_;
+    QPlainTextEdit* apps_ = nullptr;
+    QTableWidget* windows_ = nullptr;
+    QLabel* error_ = nullptr;
+    QDialogButtonBox* buttons_ = nullptr;
+    QFutureWatcher<QString> writer_;
+    QFutureWatcher<QJsonArray> displays_;
+    QJsonArray visibleWindows_;
+    QString compositorInstance_;
+};
 
 QString elapsedDescription(qint64 milliseconds) {
     if (milliseconds < 60000) return "less than a minute";
@@ -320,12 +727,21 @@ QString elapsedDescription(qint64 milliseconds) {
 }
 
 struct SeekResult { quint64 revision = 0; std::optional<FrameRecord> frame; QString error; };
-struct HighlightResult { qint64 id = 0; QString query; TextMatches matches; QString error; };
+struct HighlightResult { qint64 id = 0; QString directory, query; TextMatches matches; QString error; };
 
 class Viewer final : public QWidget {
 public:
-    explicit Viewer(QString directory) : directory_(QDir(directory).absolutePath()) {
-        setWindowTitle("Replay");
+    explicit Viewer(QString directory, ViewerServiceHooks services) : directory_(QDir(directory).absolutePath()), services_(std::move(services)) {
+        try {
+            const auto resolved = resolveReplayConfig();
+            sharedHistory_ = directory_ == QDir(replayHistoryDirectory(resolved.document.config)).absolutePath();
+            if (sharedHistory_) recording_["config_error"] = resolved.configError;
+        } catch (...) { sharedHistory_ = false; }
+        if (!services_.recordingStatus) services_.recordingStatus = recordingServiceStatus;
+        if (!services_.recordingControl) services_.recordingControl = controlRecordingService;
+        if (!services_.displays) services_.displays = connectedDisplays;
+        setWindowTitle("Omarchy Replay");
+        setProperty("historyDirectory", directory_);
         setObjectName("replayViewer");
         setFocusPolicy(Qt::StrongFocus);
         setMinimumSize(720, 480);
@@ -339,29 +755,21 @@ public:
         query_->setObjectName("recallSearch");
         query_->setAccessibleName("Search recorded text");
         query_->setPlaceholderText("Search what you saw");
-        QPixmap clearIcon(32, 32);
-        clearIcon.fill(Qt::transparent);
-        {
-            QPainter painter(&clearIcon);
-            painter.setRenderHint(QPainter::Antialiasing);
-            painter.setPen(QPen(colors.muted, 2.5, Qt::SolidLine, Qt::RoundCap));
-            painter.drawLine(10, 10, 22, 22);
-            painter.drawLine(22, 10, 10, 22);
-        }
-        auto* clearSearch = query_->addAction(QIcon(clearIcon), QLineEdit::TrailingPosition);
+        auto* clearSearch = new QPushButton("Clear");
         clearSearch->setObjectName("clearSearch");
-        clearSearch->setText("Clear search");
+        clearSearch->setAccessibleName("Clear search");
         clearSearch->setToolTip("Clear search");
         clearSearch->setVisible(false);
-        connect(clearSearch, &QAction::triggered, this, [this] { query_->clear(); query_->setFocus(); });
+        connect(clearSearch, &QPushButton::clicked, this, [this] { query_->clear(); query_->setFocus(); });
         connect(query_, &QLineEdit::textChanged, clearSearch, [clearSearch](const QString& text) { clearSearch->setVisible(!text.isEmpty()); });
         header->addWidget(query_, 1);
+        header->addWidget(clearSearch);
         detailsToggle_ = new QPushButton("Indexing");
         detailsToggle_->setObjectName("toggleDetails");
         detailsToggle_->setCheckable(true);
         detailsToggle_->setToolTip("Search indexing status (I)");
         header->addWidget(detailsToggle_);
-        helpToggle_ = new QPushButton("?");
+        helpToggle_ = new QPushButton("Help");
         helpToggle_->setObjectName("toggleHelp");
         helpToggle_->setAccessibleName("Keyboard shortcuts");
         helpToggle_->setToolTip("Keyboard shortcuts (?)");
@@ -374,6 +782,31 @@ public:
         auto* detailLayout = new QVBoxLayout(details_);
         detailLayout->setContentsMargins(18, 14, 18, 14);
         detailLayout->setSpacing(10);
+        recordingPanel_ = new QWidget;
+        recordingPanel_->setObjectName("recordingPanel");
+        auto* recordingLayout = new QVBoxLayout(recordingPanel_);
+        recordingLayout->setContentsMargins(0, 0, 0, 8);
+        auto* recordingHeader = new QHBoxLayout;
+        auto* recordingTitle = new QLabel("Recording");
+        auto recordingFont = recordingTitle->font(); recordingFont.setBold(true); recordingTitle->setFont(recordingFont);
+        recordingHeader->addWidget(recordingTitle); recordingHeader->addStretch();
+        recordingAction_ = new QPushButton("Start recording");
+        recordingAction_->setObjectName("recordingServiceAction");
+        recordingStop_ = new QPushButton("Stop recording");
+        recordingStop_->setObjectName("stopRecordingService");
+        auto* settings = new QPushButton("Settings"); settings->setObjectName("openReplaySettings");
+        deleteRecent_ = new QPushButton("Delete recent…"); deleteRecent_->setObjectName("deleteRecentHistory");
+        for (auto* button : {recordingAction_, recordingStop_, settings, deleteRecent_}) recordingHeader->addWidget(button);
+        recordingLayout->addLayout(recordingHeader);
+        recordingState_ = new QLabel;
+        recordingState_->setObjectName("recordingStatus"); recordingState_->setWordWrap(true); recordingState_->setTextFormat(Qt::PlainText);
+        recordingLayout->addWidget(recordingState_);
+        recordingPanel_->setVisible(sharedHistory_);
+        detailLayout->addWidget(recordingPanel_);
+        connect(recordingAction_, &QPushButton::clicked, this, [this] { requestRecording(recordingAction_->property("action").toString()); });
+        connect(recordingStop_, &QPushButton::clicked, this, [this] { requestRecording("stop"); });
+        connect(settings, &QPushButton::clicked, this, [this] { showSettings(); });
+        connect(deleteRecent_, &QPushButton::clicked, this, [this] { deleteRecent(); });
         auto* detailHeader = new QHBoxLayout;
         auto* indexTitle = new QLabel("Search index");
         auto indexFont = indexTitle->font(); indexFont.setBold(true); indexTitle->setFont(indexFont);
@@ -441,7 +874,7 @@ public:
             {"Home  End", "First / latest moment"}, {"PgUp  PgDn", "Previous / next match page"}, {"F  /  1", "Fit / original size"},
             {"Shift+arrows", "Pan original image"}, {"Ctrl+C", "Copy matching lines (or all text without a search)"},
             {"Ctrl+Shift+C", "Copy all recognized screen text"}, {"M", "Toggle highlights"},
-            {"P  /  C", "Index moment / catch up"}, {"I  /  ?", "Index status / shortcuts"}, {"Esc", "Leave control / dismiss panel, then close"}};
+            {"P  /  C", "Index moment / catch up"}, {"I  /  ?", "Controls / shortcuts"}, {"Esc", "Leave control / dismiss panel, then close"}};
         const int helpRows = (shortcuts.size() + 1) / 2;
         for (int i = 0; i < shortcuts.size(); ++i) {
             const int row = i % helpRows, column = i / helpRows * 2;
@@ -504,8 +937,8 @@ public:
         matchLayout->setSpacing(18);
         matchLayout->addWidget(resultsHeading_);
         matchLayout->addStretch();
-        previousMatch_ = new QPushButton("↑"); previousMatch_->setAccessibleName("Previous match");
-        nextMatch_ = new QPushButton("↓"); nextMatch_->setAccessibleName("Next match");
+        previousMatch_ = new QPushButton("Previous match"); previousMatch_->setAccessibleName("Previous match");
+        nextMatch_ = new QPushButton("Next match"); nextMatch_->setAccessibleName("Next match");
         matchLayout->addWidget(previousMatch_); matchLayout->addWidget(nextMatch_);
         connect(previousMatch_, &QPushButton::clicked, this, [this] { stepMatch(-1); });
         connect(nextMatch_, &QPushButton::clicked, this, [this] { stepMatch(1); });
@@ -516,9 +949,9 @@ public:
         layout->addWidget(timeline_);
         layout->addWidget(results_);
         auto* controls = new QHBoxLayout;
-        previous_ = new QPushButton("←"); previous_->setObjectName("earlierMoment");
+        previous_ = new QPushButton("Earlier"); previous_->setObjectName("earlierMoment");
         previous_->setAccessibleName("Earlier moment");
-        next_ = new QPushButton("→"); next_->setObjectName("laterMoment");
+        next_ = new QPushButton("Later"); next_->setObjectName("laterMoment");
         next_->setAccessibleName("Later moment");
         auto* fit = new QPushButton("Fit"); fit->setObjectName("fitImage");
         auto* actual = new QPushButton("100%"); actual->setObjectName("actualImageSize");
@@ -582,9 +1015,9 @@ public:
         connect(&highlightReader_, &QFutureWatcher<HighlightResult>::finished, this, [this] {
             if (closing_->load()) return;
             const auto result = highlightReader_.result();
-            if (result.id != selected_.id || result.query != completedQuery_) { startHighlights(); return; }
+            if (result.directory != directory_ || result.id != selected_.id || result.query != completedQuery_) { startHighlights(); return; }
             highlighted_ = result;
-            evidence_->setHighlights(result.matches.boxes);
+            if (property("displayedFrameId").toLongLong() == selected_.id) evidence_->setHighlights(result.matches.boxes);
             setProperty("highlightCount", result.matches.boxes.size());
             indexState_->setToolTip(result.matches.boxes.isEmpty() && !completedQuery_.isEmpty()
                 ? "No matching text positions stored for this moment. Older history remains searchable without highlights."
@@ -604,7 +1037,7 @@ public:
         connect(&neighborReader_, &QFutureWatcher<TimelineNeighbors>::finished, this, [this] {
             if (closing_->load()) return;
             const auto neighbors = neighborReader_.result();
-            if (neighbors.id != selected_.id) { startNeighborRead(); return; }
+            if (neighbors.directory != directory_ || neighbors.id != selected_.id) { startNeighborRead(); return; }
             previousFrame_ = neighbors.previous;
             nextFrame_ = neighbors.next;
             previous_->setEnabled(previousFrame_.has_value());
@@ -615,6 +1048,7 @@ public:
             if (closing_->load()) return;
             const auto result = indexRequest_.result();
             setProperty("indexingRequestInFlight", false);
+            if (result.directory != directory_) { updateIndexingActions(); search(true); return; }
             if (!result.error.isEmpty()) {
                 requestMessage_ = "Unable to queue indexing: " + result.error;
             } else {
@@ -642,17 +1076,31 @@ public:
             search(true);
         });
 
+        connect(&recordingRequest_, &QFutureWatcher<ServiceControlResult>::finished, this, [this] {
+            if (closing_->load()) return;
+            const auto result = recordingRequest_.result();
+            setProperty("recordingRequestInFlight", false);
+            recordingMessage_ = result.error;
+            if (result.error.isEmpty()) recording_ = result.status;
+            if (result.error.isEmpty() && result.action == "reload" && followConfiguredHistory(result.status)) return;
+            updateRecordingActions(); search(true);
+        });
+
         connect(&decoder_, &QFutureWatcher<DecodedFrame>::finished, this, [this] {
             if (closing_->load()) return;
             const DecodedFrame result = decoder_.result();
-            if (result.id == selected_.id) {
+            if (result.directory == directory_ && result.id == selected_.id) {
                 setProperty("mediaLoading", false);
                 if (result.image.isNull()) {
+                    evidence_->setImage({});
                     mediaStatus_->setText(result.error.isEmpty() ? "Recorded image is unavailable." : result.error);
                     mediaStatus_->show();
                 } else {
                     evidence_->setImage(result.image);
                     setProperty("displayedFrameId", result.id);
+                    if (copyStatus_->text() == "Wait for the recorded image to load.") copyStatus_->hide();
+                    if (highlighted_.id == result.id && highlighted_.directory == directory_ && highlighted_.query == completedQuery_)
+                        evidence_->setHighlights(highlighted_.matches.boxes);
                     mediaStatus_->clear();
                     mediaStatus_->hide();
                     evidence_->setToolTip(QString("Recorded screen · %1 × %2 · F fit / 1 original size").arg(result.image.width()).arg(result.image.height()));
@@ -665,6 +1113,7 @@ public:
         installEventFilter(this);
         updateNavigation();
         updateIndexingActions();
+        updateRecordingActions();
         search();
         refreshTimer_.setInterval(2000);
         connect(&refreshTimer_, &QTimer::timeout, this, [this] {
@@ -747,6 +1196,92 @@ protected:
     }
 
 private:
+    bool followConfiguredHistory(const QJsonObject& status) {
+        const QString history = status.value("history_directory").toString();
+        if (!sharedHistory_ || history.isEmpty() || !status.value("config_error").toString().isEmpty() ||
+            (status.contains("storage_available") && !status.value("storage_available").toBool()) ||
+            QDir(history).absolutePath() == directory_) return false;
+        directory_ = QDir(history).absolutePath();
+        setProperty("historyDirectory", directory_);
+        cancelSeek(); ++selectionRevision_;
+        selected_ = {}; matches_.clear(); requestedMoments_.clear();
+        evidence_->setImage({}); evidence_->setHighlights({});
+        setProperty("displayedFrameId", 0); setProperty("selectedFrameId", 0);
+        setProperty("highlightCount", 0); highlighted_ = {};
+        pageOffset_ = 0; totalFrames_ = 0; totalMatches_ = 0;
+        updateNavigation(); updateRecordingActions(); search(false, 0);
+        return true;
+    }
+
+    void updateRecordingActions() {
+        if (!sharedHistory_) return;
+        const bool busy = recordingRequest_.isRunning();
+        const QString intent = recording_.value("intent").toString("stopped");
+        const bool running = recording_.value("running").toBool();
+        const QString action = intent == "paused" ? "resume" : intent == "running" && running ? "pause" : "start";
+        recordingAction_->setText(action == "pause" ? "Pause recording" : action == "resume" ? "Resume recording" : "Start recording");
+        recordingAction_->setProperty("action", action);
+        recordingAction_->setEnabled(!busy);
+        recordingStop_->setEnabled(!busy && intent != "stopped");
+        deleteRecent_->setEnabled(!busy && totalFrames_ > 0);
+        QString state = recording_.value("state").toString("offline");
+        const QMap<QString, QString> states{{"offline", "Recording is stopped."}, {"stopped", "Recording is stopped."},
+            {"recording", "Recording"}, {"paused", "Recording is paused."}, {"locked", "Paused while the screen is locked."},
+            {"sleeping", "Paused while the computer sleeps."}, {"output-unavailable", "Waiting for your selected display."},
+            {"excluded", "Paused while an excluded window is visible."}, {"storage-full", "Recording paused: storage limit reached."},
+            {"excluded_window", "Paused while an excluded window is visible."},
+            {"output_unavailable", "Waiting for your selected display."}, {"output_off", "Waiting for your selected display."},
+            {"output_identity_changed", "The selected display has changed. Review Settings."},
+            {"stale_window_exclusion", "Review window exclusions for this desktop session."},
+            {"deleting", "Removing recent history."}, {"capture-error", "Recording needs attention."},
+            {"error", "Recording needs attention."}};
+        QStringList message;
+        if (busy) message << "Updating recording controls…";
+        else message << states.value(state, "Waiting to record.");
+        if (state == "recording" && !recording_.value("output").toString().isEmpty()) message.last() += " " + recording_.value("output").toString() + ".";
+        for (const auto& value : {recording_.value("reason").toString(), recording_.value("config_error").toString(), recording_.value("storage_error").toString(), recordingMessage_})
+            if (!value.isEmpty()) message << value;
+        recordingState_->setText(message.join(' '));
+        setProperty("recordingState", state);
+    }
+
+    void requestRecording(const QString& action, const QJsonObject& arguments = {}) {
+        if (!sharedHistory_ || closing_->load() || recordingRequest_.isRunning()) return;
+        const auto control = services_.recordingControl;
+        const auto closing = closing_;
+        setProperty("recordingRequestInFlight", true);
+        recordingRequest_.setFuture(QtConcurrent::run([action, arguments, control, closing] {
+            ServiceControlResult result; result.action = action;
+            try { if (!closing->load()) result.status = control(action, arguments); }
+            catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
+            return result;
+        }));
+        updateRecordingActions(); updateIndexingActions();
+    }
+
+    void showSettings() {
+        SettingsDialog settings(this, recording_, services_.displays);
+        if (settings.exec() == QDialog::Accepted) requestRecording("reload");
+    }
+
+    void deleteRecent() {
+        QInputDialog interval(this);
+        theme(&interval);
+        interval.setWindowTitle("Delete recent history"); interval.setLabelText("Delete the last how many minutes?");
+        interval.setInputMode(QInputDialog::IntInput); interval.setIntRange(1, 1440); interval.setIntValue(5);
+        removeButtonIcons(&interval);
+        if (interval.exec() != QDialog::Accepted) return;
+        const int minutes = interval.intValue();
+        QMessageBox confirmation(QMessageBox::NoIcon, "Permanently delete recent history?",
+            QString("Delete all recorded images, recognized text and queued work from the last %1 minutes? This cannot be undone. Recording will keep its current start or pause choice.").arg(minutes),
+            QMessageBox::Yes | QMessageBox::Cancel, this);
+        confirmation.setObjectName("confirmDeleteRecent");
+        theme(&confirmation);
+        removeButtonIcons(&confirmation);
+        confirmation.setDefaultButton(QMessageBox::Cancel);
+        if (confirmation.exec() == QMessageBox::Yes) requestRecording("delete-recent", {{"seconds", minutes * 60}, {"confirmed", true}});
+    }
+
     void escape() {
         if (query_->hasFocus() && query_->text() != completedQuery_) search();
         if (details_->isVisible() || help_->isVisible()) {
@@ -806,6 +1341,7 @@ private:
         // uses a one-second busy timeout) before the dataset/viewer can go away.
         indexRequest_.waitForFinished();
         serviceRequest_.waitForFinished();
+        recordingRequest_.waitForFinished();
         historyReader_.waitForFinished();
         neighborReader_.waitForFinished();
         decoder_.waitForFinished();
@@ -843,6 +1379,7 @@ private:
             preserve = preserve && requestedHistory_.preserve;
         }
         preserve = preserve && !newQuery;
+        if (preserve && !anchorFrameId && !query_->text().trimmed().isEmpty()) anchorFrameId = selected_.id;
         searchTimer_.stop();
         if (!preserve) { dwellTimer_.stop(); cancelSeek(); }
         completedQuery_ = query_->text();
@@ -864,14 +1401,38 @@ private:
         const QString directory = directory_;
         const auto request = requestedHistory_;
         const auto closing = closing_;
-        historyReader_.setFuture(QtConcurrent::run([directory, request, closing]() mutable {
+        const bool shared = sharedHistory_;
+        const auto recordingStatus = services_.recordingStatus;
+        historyReader_.setFuture(QtConcurrent::run([directory, request, closing, shared, recordingStatus]() mutable {
             auto result = request;
             try {
                 if (closing->load()) return result;
+                if (shared) {
+                    try { result.recording = recordingStatus(); }
+                    catch (const std::exception& error) { result.recording = {{"state", "error"}, {"reason", QString::fromUtf8(error.what())}}; }
+                    result.service = result.recording.value("index_service").toObject();
+                    result.service["running"] = result.recording.value("running").toBool();
+                    result.service["paused"] = result.recording.value("indexing_paused").toBool();
+                    result.service["enabled"] = true;
+                    result.service["worker_policy"] = result.recording.value("worker_policy");
+                    result.service["worker_running"] = result.recording.value("indexing").toBool();
+                    result.service["last_worker_resources"] = result.recording.value("worker_resources");
+                    const auto activity = result.recording.value("worker_policy").toObject();
+                    const qint64 updated = activity.value("updated_ms").toInteger();
+                    result.service["policy_age_ms"] = updated ? std::max<qint64>(0, QDateTime::currentMSecsSinceEpoch() - updated) : -1;
+                    result.service["effective_cpu_percent"] = activity.value("effective_cpu_percent");
+                    result.service["state"] = activity.value("mode").toString("waiting");
+                    if (!result.recording.value("index_error").toString().isEmpty()) {
+                        result.service["state"] = "error";
+                        result.service["error"] = result.recording.value("index_error");
+                    }
+                    result.policy = result.recording.value("index_policy").toObject();
+                    if (!QFileInfo::exists(QDir(directory).filePath("index.sqlite"))) return result;
+                }
                 result.indexing = indexingStatus(directory);
                 try {
-                    result.service = indexServiceStatus(directory);
-                    result.policy = savedIndexPolicy(directory);
+                    if (!shared) result.service = indexServiceStatus(directory);
+                    if (!shared) result.policy = savedIndexPolicy(directory);
                 } catch (const std::exception& error) {
                     result.service["state"] = "error";
                     result.service["error"] = QString::fromUtf8(error.what());
@@ -884,7 +1445,7 @@ private:
                     result.matches = result.page.frames;
                 }
                 if (!closing->load() && result.currentId) result.current = frameById(directory, result.currentId);
-                else if (!closing->load() && result.query.trimmed().isEmpty() && result.timeline.totalFrames)
+                if (!closing->load() && !result.current && result.query.trimmed().isEmpty() && result.timeline.totalFrames)
                     result.current = frameNearTimestamp(directory, result.timeline.lastTimestampMs);
             } catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
             return result;
@@ -892,6 +1453,11 @@ private:
     }
 
     void applyHistory(const HistorySnapshot& snapshot) {
+        if (sharedHistory_ && !recordingRequest_.isRunning()) {
+            recording_ = snapshot.recording;
+            if (followConfiguredHistory(recording_)) return;
+            updateRecordingActions();
+        }
         if (query_->text() != snapshot.query) { search(); return; }
         const bool preserve = snapshot.preserve;
         const bool navigated = snapshot.selectionRevision != selectionRevision_;
@@ -935,9 +1501,9 @@ private:
             matchReadout_->setVisible(!recent);
             ready_ = index.value("ready").toInteger();
             totalFrames_ = index.value("coverage_total_frames").toInteger();
-            detailsToggle_->setText(pending_ > 0 ? QString("%1 pending").arg(pending_) : failed_ > 0
+            detailsToggle_->setText(sharedHistory_ ? "Controls" : pending_ > 0 ? QString("%1 pending").arg(pending_) : failed_ > 0
                 ? QString("%1 failed").arg(failed_) : "Index");
-            detailsToggle_->setToolTip(indexingNotice().isEmpty() ? "Search indexing status (I)" : indexingNotice());
+            detailsToggle_->setToolTip(sharedHistory_ ? "Recording, indexing and settings (I)" : indexingNotice().isEmpty() ? "Search indexing status (I)" : indexingNotice());
             if (!matches_.isEmpty()) results_->setCurrentRow(std::min(selectedRow, int(matches_.size()) - 1));
             if (preserve || navigated) results_->horizontalScrollBar()->setValue(scroll);
             if (navigated && selected_.id) {
@@ -954,11 +1520,12 @@ private:
                 setProperty("displayedFrameId", 0);
                 evidence_->setImage({});
                 indexState_->clear();
-                recorded_->setText(recent ? "No recorded history in this dataset" : "No matching recorded text");
+                recorded_->setText(recent ? sharedHistory_ ? "Your history starts here" : "No recorded history in this dataset" : "No matching recorded text");
                 mediaStatus_->show();
                 mediaStatus_->setText(pending_ > 0 ? "Saved images are not searchable yet. Clear the search to browse them while indexing is pending."
                     : failed_ > 0 ? "Text indexing failed for saved images. Clear the search to browse the recorded images."
-                    : recent ? "Run the controlled demo to create synthetic history."
+                    : recent ? sharedHistory_ ? "Open Controls with I to choose a display and start recording. Opening Replay does not record your screen."
+                                             : "Run the controlled demo to create synthetic history."
                              : "Try a shorter word or another spelling. This does not prove it never appeared.");
                 updateNavigation();
             } else {
@@ -986,6 +1553,7 @@ private:
             updateNavigation();
         }
         updateIndexingActions();
+        updateRecordingActions();
         updateMatchReadout();
     }
 
@@ -1033,9 +1601,15 @@ private:
         if (changed && frame.ocrState == "pending" && !requestedMoments_.contains(frame.id)) dwellTimer_.start();
         if (keepImage) return;
         setProperty("displayedFrameId", 0);
-        evidence_->setImage({});
-        mediaStatus_->show();
-        mediaStatus_->setText(frame.available ? "Loading recorded image…" : "Recorded media is not available yet.");
+        evidence_->setHighlights({});
+        // Keep the previous pixels until the new image is ready. Repainting an
+        // empty themed canvas produces a conspicuous flash during short decodes.
+        // displayedFrameId is cleared so copy and overlays cannot use stale pixels.
+        if (frame.available) { mediaStatus_->clear(); mediaStatus_->hide(); }
+        else {
+            evidence_->setImage({}); mediaStatus_->show();
+            mediaStatus_->setText("Recorded media is not available yet.");
+        }
         if (!decoder_.isRunning()) startDecode();
     }
 
@@ -1051,7 +1625,7 @@ private:
         setProperty("mediaLoading", true);
         decoder_.setFuture(QtConcurrent::run([directory, id, closing] {
             DecodedFrame result;
-            result.id = id;
+            result.id = id; result.directory = directory;
             try { result.image = loadFrame(directory, id, [closing] { return closing->load(); }); }
             catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
             return result;
@@ -1075,7 +1649,7 @@ private:
         const auto closing = closing_;
         neighborReader_.setFuture(QtConcurrent::run([directory, id, closing] {
             TimelineNeighbors result;
-            result.id = id;
+            result.id = id; result.directory = directory;
             try {
                 if (closing->load()) return result;
                 result.previous = adjacentFrame(directory, id, -1);
@@ -1093,8 +1667,8 @@ private:
 
     void updateIndexingActions() {
         const bool busy = indexRequest_.isRunning();
-        const bool serviceBusy = serviceRequest_.isRunning();
-        const bool configured = !servicePolicy_.isEmpty();
+        const bool serviceBusy = serviceRequest_.isRunning() || (sharedHistory_ && recordingRequest_.isRunning());
+        const bool configured = sharedHistory_ || !servicePolicy_.isEmpty();
         const bool paused = service_.value("paused").toBool();
         const bool running = service_.value("running").toBool();
         const bool external = service_.value("external_worker").toBool();
@@ -1119,10 +1693,10 @@ private:
             service_.value("policy_error").toString().isEmpty());
         copyWorkerCommand_->setToolTip(workerCommand());
         serviceAction_->setVisible(configured && !legacy_);
-        serviceAction_->setText(paused ? "Resume" : running ? "Pause" : "Start indexing");
+        serviceAction_->setText(paused ? sharedHistory_ ? "Resume indexing" : "Resume" : running ? sharedHistory_ ? "Pause indexing" : "Pause" : "Start indexing");
         serviceAction_->setProperty("action", paused ? "resume" : running ? "pause" : "start");
         serviceAction_->setEnabled(!serviceBusy);
-        stopService_->setVisible(!legacy_ && (running || service_.value("enabled").toBool()));
+        stopService_->setVisible(!sharedHistory_ && !legacy_ && (running || service_.value("enabled").toBool()));
         stopService_->setEnabled(!serviceBusy);
         QStringList messages;
         if (serviceBusy) messages << "Updating background indexing…";
@@ -1174,6 +1748,14 @@ private:
             else if (resources.value("state").toString() == "unavailable")
                 details << "Worker ceiling unavailable; OCR pacing and low priority remain active.";
         }
+        if (sharedHistory_ && !indexerRunning_) {
+            const auto last = service_.value("last_worker_resources").toObject();
+            if (last.value("enforced").toBool()) details << QString("Last worker ceiling: %1% of one core; low priority.")
+                .arg(last.value("effective_cpu_percent").toDouble(), 0, 'g', 3);
+            else if (last.value("state").toString() == "unavailable") details << "Last worker ceiling unavailable; OCR pacing remained active.";
+            else if (servicePolicy_.contains("ocr_cpu_ceiling_percent")) details << QString("Configured worker ceiling: %1% of one core; checked when indexing starts.")
+                .arg(servicePolicy_.value("ocr_cpu_ceiling_percent").toDouble(), 0, 'g', 3);
+        }
         if (pending_ > 0) details << "Oldest waiting moment: " + elapsedDescription(oldestPendingMs_) + ".";
         workerHint_->setText(details.join(' '));
         workerHint_->setToolTip(service_.value("recovery").toString());
@@ -1181,6 +1763,7 @@ private:
     }
 
     void requestService(const QString& action) {
+        if (sharedHistory_) { requestRecording(action == "pause" || action == "stop" ? "index-pause" : "index-resume"); return; }
         if (closing_->load() || serviceRequest_.isRunning() || (servicePolicy_.isEmpty() && action != "stop")) return;
         const QString directory = directory_;
         const auto closing = closing_;
@@ -1206,7 +1789,7 @@ private:
         setProperty("indexingRequestInFlight", true);
         indexRequest_.setFuture(QtConcurrent::run([directory, id, closing] {
             IndexingRequestResult result;
-            result.frameId = id;
+            result.frameId = id; result.directory = directory;
             try { if (!closing->load()) result.changed = requestIndexing(directory, id, 15); }
             catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
             return result;
@@ -1221,6 +1804,7 @@ private:
         setProperty("indexingRequestInFlight", true);
         indexRequest_.setFuture(QtConcurrent::run([directory, closing] {
             IndexingRequestResult result;
+            result.directory = directory;
             result.catchUp = true;
             try { if (!closing->load()) result.changed = requestCatchUp(directory, 120); }
             catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
@@ -1268,7 +1852,7 @@ private:
         const qint64 id = selected_.id;
         const auto closing = closing_;
         highlightReader_.setFuture(QtConcurrent::run([directory, id, query, closing] {
-            HighlightResult result; result.id = id; result.query = query;
+            HighlightResult result; result.id = id; result.directory = directory; result.query = query;
             try { if (!closing->load()) result.matches = matchingTextLines(directory, id, query, SearchMode::PrefixLastToken); }
             catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
             return result;
@@ -1333,6 +1917,14 @@ private:
     QFutureWatcher<HighlightResult> highlightReader_;
     HighlightResult highlighted_;
     QString directory_;
+    bool sharedHistory_ = false;
+    ViewerServiceHooks services_;
+    QJsonObject recording_;
+    QString recordingMessage_;
+    QWidget* recordingPanel_ = nullptr;
+    QPushButton *recordingAction_ = nullptr, *recordingStop_ = nullptr, *deleteRecent_ = nullptr;
+    QLabel* recordingState_ = nullptr;
+    QFutureWatcher<ServiceControlResult> recordingRequest_;
     std::shared_ptr<std::atomic_bool> closing_ = std::make_shared<std::atomic_bool>(false);
     QString completedQuery_;
     qint64 pending_ = 0, failed_ = 0, disabled_ = 0, priorityPending_ = 0, catchUpUntil_ = 0;
@@ -1379,8 +1971,8 @@ private:
 
 }  // namespace
 
-std::unique_ptr<QWidget> createViewer(const QString& datasetDirectory) {
-    return std::make_unique<Viewer>(datasetDirectory);
+std::unique_ptr<QWidget> createViewer(const QString& datasetDirectory, ViewerServiceHooks services) {
+    return std::make_unique<Viewer>(datasetDirectory, std::move(services));
 }
 
 int showViewer(const QString& datasetDirectory) {

@@ -23,15 +23,15 @@ def lua_string(value):
                          else '\\' + str(byte).zfill(3) for byte in os.fsencode(value)) + '"'
 
 
-def updated_config(original, rule_path):
-    block = BEGIN + '\n' + 'dofile(' + lua_string(rule_path) + ')\n' + END
-    if BEGIN in original or END in original:
-        if original.count(BEGIN) != 1 or original.count(END) != 1:
+def updated_config(original, rule_path, begin=BEGIN, end=END):
+    block = begin + '\n' + 'dofile(' + lua_string(rule_path) + ')\n' + end
+    if begin in original or end in original:
+        if original.count(begin) != 1 or original.count(end) != 1:
             raise RuntimeError('Replay configuration markers are ambiguous; no files changed.')
-        before, remainder = original.split(BEGIN)
-        if END not in remainder:
+        before, remainder = original.split(begin)
+        if end not in remainder:
             raise RuntimeError('Replay configuration markers are out of order; no files changed.')
-        _, after = remainder.split(END)
+        _, after = remainder.split(end)
         # Relocate the owned block to the end so later user rules cannot cancel it.
         original = before.rstrip() + '\n' + after.lstrip('\n')
     return original.rstrip() + '\n\n' + block + '\n'
@@ -77,20 +77,20 @@ def backup(path):
     return destination
 
 
-def install(config_home):
+def install(config_home, source=None, filename="replay-viewer.lua", begin=BEGIN, end=END):
     config_home = Path(config_home).expanduser().resolve()
     config = (config_home / 'hypr/hyprland.lua').resolve(strict=True)
     if not config.is_file():
         raise RuntimeError('Expected an existing Hyprland Lua configuration.')
-    rule = config_home / 'oma-rewind/hypr/replay-viewer.lua'
+    rule = config_home / 'omarchy-replay/hypr' / filename
     if rule.is_symlink():
         raise RuntimeError('The managed Replay rule must not be a symbolic link.')
     old_rule = rule.read_bytes() if rule.exists() else None
     if old_rule is not None and not old_rule.startswith(RULE_PREFIX.encode()):
         raise RuntimeError('The Replay rule path contains an unmanaged file; no files changed.')
-    rule_data = (ROOT / 'config/hypr/replay-viewer.lua').read_bytes()
+    rule_data = (source or ROOT / 'config/hypr/replay-viewer.lua').read_bytes()
     old_config = config.read_bytes()
-    new_config = updated_config(old_config.decode('utf-8'), str(rule)).encode('utf-8')
+    new_config = updated_config(old_config.decode('utf-8'), str(rule), begin, end).encode('utf-8')
     mode = stat.S_IMODE(config.stat().st_mode)
     old_rule_mode = stat.S_IMODE(rule.stat().st_mode) if old_rule is not None else 0o600
     # Do not attribute pre-existing errors to this change or install into a broken config.
@@ -123,8 +123,8 @@ def install(config_home):
             current_config = old_config
         # A concurrent editor may retain our include. Keep its target rather
         # than breaking that newer configuration during rollback.
-        keep_rule = BEGIN.encode() in current_config and lua_string(str(rule)).encode() in current_config
-        if not keep_rule and rule.exists() and rule.read_bytes() == rule_data and old_rule != rule_data:
+        keep_rule = begin.encode() in current_config and lua_string(str(rule)).encode() in current_config
+        if (old_rule is not None or not keep_rule) and rule.exists() and rule.read_bytes() == rule_data and old_rule != rule_data:
             if old_rule is None:
                 rule.unlink()
             else:

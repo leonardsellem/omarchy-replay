@@ -42,14 +42,28 @@ class InstallTest(unittest.TestCase):
                 installer.install(self.root)
             self.assertEqual(command.call_count, 5)
         self.assertEqual(self.config.read_text(), self.original)
-        self.assertFalse((self.root / 'oma-rewind/hypr/replay-viewer.lua').exists())
+        self.assertFalse((self.root / 'omarchy-replay/hypr/replay-viewer.lua').exists())
+
+    def test_rejected_update_restores_an_already_included_rule(self):
+        with patch.object(installer, 'hyprctl', return_value=''):
+            installer.install(self.root)
+        rule = self.root / 'omarchy-replay/hypr/replay-viewer.lua'
+        previous = rule.read_bytes()
+        config = self.config.read_bytes()
+        source = self.root / 'replacement.lua'
+        source.write_bytes(previous + b'-- Simulated rejected update\n')
+        with patch.object(installer, 'hyprctl', side_effect=['', '', 'bad update', '', '']):
+            with self.assertRaisesRegex(RuntimeError, 'bad update'):
+                installer.install(self.root, source=source)
+        self.assertEqual(rule.read_bytes(), previous)
+        self.assertEqual(self.config.read_bytes(), config)
 
     def test_preexisting_errors_or_unmanaged_file_leave_configuration_alone(self):
         with patch.object(installer, 'hyprctl', return_value='existing error'):
             with self.assertRaisesRegex(RuntimeError, 'existing error'):
                 installer.install(self.root)
         self.assertEqual(self.config.read_text(), self.original)
-        rule = self.root / 'oma-rewind/hypr/replay-viewer.lua'
+        rule = self.root / 'omarchy-replay/hypr/replay-viewer.lua'
         rule.parent.mkdir(parents=True)
         rule.write_text('-- My own rule\n')
         with self.assertRaisesRegex(RuntimeError, 'unmanaged'):
@@ -65,6 +79,21 @@ class InstallTest(unittest.TestCase):
         self.assertIn('\\034quotes\\034', twice)
         self.assertIn('\\195\\169.lua', twice)
 
+    def test_window_and_capture_rules_keep_separate_managed_blocks(self):
+        begin, end = '-- BEGIN Omarchy Replay window', '-- END Omarchy Replay window'
+        with patch.object(installer, 'hyprctl', return_value=''):
+            installer.install(self.root)
+            installer.install(self.root, source=ROOT / 'config/hypr/replay-window.lua',
+                              filename='replay-window.lua', begin=begin, end=end)
+            once = self.config.read_text()
+            installer.install(self.root, source=ROOT / 'config/hypr/replay-window.lua',
+                              filename='replay-window.lua', begin=begin, end=end)
+        self.assertEqual(once, self.config.read_text())
+        self.assertEqual(once.count(installer.BEGIN), 1)
+        self.assertEqual(once.count(begin), 1)
+        self.assertTrue((self.root / 'omarchy-replay/hypr/replay-viewer.lua').is_file())
+        self.assertTrue((self.root / 'omarchy-replay/hypr/replay-window.lua').is_file())
+
     def test_concurrent_edit_before_apply_is_preserved(self):
         newer = self.original + '-- Added by another editor\n'
         def edit_during_validation(*_):
@@ -74,7 +103,7 @@ class InstallTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'changed during installation'):
                 installer.install(self.root)
         self.assertEqual(self.config.read_text(), newer)
-        self.assertFalse((self.root / 'oma-rewind/hypr/replay-viewer.lua').exists())
+        self.assertFalse((self.root / 'omarchy-replay/hypr/replay-viewer.lua').exists())
 
     def test_failed_validation_does_not_break_concurrently_retained_include(self):
         calls = 0
@@ -90,7 +119,7 @@ class InstallTest(unittest.TestCase):
                 installer.install(self.root)
         self.assertTrue(self.config.read_text().endswith('-- Concurrent edit\n'))
         self.assertIn(installer.BEGIN, self.config.read_text())
-        self.assertTrue((self.root / 'oma-rewind/hypr/replay-viewer.lua').is_file())
+        self.assertTrue((self.root / 'omarchy-replay/hypr/replay-viewer.lua').is_file())
 
 
 if __name__ == '__main__':

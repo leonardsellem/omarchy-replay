@@ -6,6 +6,7 @@
 #include "index_scheduler.h"
 #include "index_resources.h"
 #include "index_service.h"
+#include "recording_service.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -186,11 +187,26 @@ int main(int argc, char **argv) {
     qputenv("OMP_THREAD_LIMIT", "1");
     const QString command = argc > 1 ? QString::fromLocal8Bit(argv[1]) : "help";
     if (command != "view" && command != "fixture") qputenv("QT_QPA_PLATFORM", "offscreen");
-    const bool gui = command == "view" || command == "fixture" || command == "demo" || command == "export-fixture";
+    bool syntheticDaemon = false;
+    for (int i = 2; i < argc; ++i) if (QString::fromLocal8Bit(argv[i]) == "--synthetic") syntheticDaemon = true;
+    if (command == "daemon" && syntheticDaemon) {
+        qputenv("QT_QPA_PLATFORMTHEME", ""); qputenv("QT_STYLE_OVERRIDE", "Fusion");
+    }
+    const bool gui = command == "view" || command == "fixture" || command == "demo" || command == "export-fixture" ||
+                     (command == "daemon" && syntheticDaemon);
+    QCoreApplication::setAttribute(Qt::AA_DontShowIconsInMenus);
     std::unique_ptr<QCoreApplication> app;
     if (gui) app = std::make_unique<QApplication>(argc, argv);
     else app = std::make_unique<QCoreApplication>(argc, argv);
-    app->setApplicationName("Omarchy Replay feasibility prototype");
+    app->setApplicationName("Omarchy Replay");
+    if (command == "daemon") {
+        std::signal(SIGINT, stop); std::signal(SIGTERM, stop);
+        try {
+            QStringList arguments{app->applicationFilePath()};
+            arguments.append(app->arguments().mid(2));
+            return replay::recordingCommand(arguments, [] { return bool(interrupted); });
+        } catch (const std::exception &error) { std::fprintf(stderr, "Replay: %s\n", error.what()); return 1; }
+    }
     if (auto* guiApp = qobject_cast<QGuiApplication*>(app.get()))
         // The viewer's compositor exclusion must not hide synthetic fixtures.
         guiApp->setDesktopFileName(command == "view" ? "omarchy-replay" : "omarchy-replay-fixture");

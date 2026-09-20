@@ -2,21 +2,34 @@
 #include "recorder.h"
 #include "viewer.h"
 #include "index_service.h"
+#include "replay_config.h"
+#include "agent_prompt.h"
 
-#include <QAction>
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QComboBox>
+#include <QSpinBox>
+#include <QMessageBox>
+#include <QInputDialog>
+#include <QTabWidget>
+#include <QMutex>
+#include <QThread>
+#include <QTimer>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QFontMetrics>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QPainter>
+#include <QProcess>
 #include <QSlider>
 #include <QScrollBar>
 #include <QJsonDocument>
@@ -29,6 +42,48 @@
 #include <cerrno>
 #include <csignal>
 #include <unistd.h>
+
+namespace {
+class ViewerEnvironment {
+public:
+    explicit ViewerEnvironment(const QString& root) {
+        for (const auto* name : {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"}) {
+            saved_.insert(name, {qEnvironmentVariableIsSet(name), qgetenv(name)});
+            qputenv(name, QDir(root).filePath(name).toUtf8());
+        }
+    }
+    ~ViewerEnvironment() {
+        for (auto item = saved_.cbegin(); item != saved_.cend(); ++item)
+            if (item.value().first) qputenv(item.key().constData(), item.value().second); else qunsetenv(item.key().constData());
+    }
+private:
+    QMap<QByteArray, QPair<bool, QByteArray>> saved_;
+};
+struct FakeRecording {
+    QMutex mutex;
+    QStringList actions;
+    bool usedGuiThread = false;
+    QJsonObject status{{"running", false}, {"intent", "stopped"}, {"state", "offline"}, {"indexing", false}, {"indexing_paused", false}};
+    replay::ViewerServiceHooks hooks() {
+        return {[this] { QMutexLocker guard(&mutex); usedGuiThread |= QThread::currentThread() == qApp->thread(); return status; },
+            [this](const QString& action, const QJsonObject&) {
+                QMutexLocker guard(&mutex);
+                usedGuiThread |= QThread::currentThread() == qApp->thread(); actions.append(action);
+                status["running"] = true;
+                if (action == "start" || action == "resume") { status["intent"] = "running"; status["state"] = "recording"; }
+                else if (action == "pause") { status["intent"] = "paused"; status["state"] = "paused"; }
+                else if (action == "stop") { status["intent"] = "stopped"; status["state"] = "stopped"; }
+                else if (action == "index-pause") status["indexing_paused"] = true;
+                else if (action == "index-resume") status["indexing_paused"] = false;
+                else if (action == "reload") status["history_directory"] = replay::replayHistoryDirectory(replay::loadReplayConfig().config);
+                return status;
+            }, [] { return QJsonArray{
+                QJsonObject{{"name", "SYNTHETIC-1"}, {"model", "Fixture display"}, {"width", 1920}, {"height", 1080}},
+                QJsonObject{{"name", "SYNTHETIC-2"}, {"model", "Second fixture display"}, {"width", 2560}, {"height", 1440}}}; }};
+    }
+    QStringList calls() { QMutexLocker guard(&mutex); return actions; }
+};
+}
 
 // This exercises the GUI with a deterministic index, independently of OCR/model
 // accuracy. The CLI feasibility harness verifies OCR against fixtureGroundTruth.
@@ -105,6 +160,203 @@ class ViewerTest final : public QObject {
     }
 
 private slots:
+    void copiedPromptsDescribeAnInstalledPluginWithoutSourceFiles() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        replay::AgentPromptContext context;
+        context.executable = "/opt/Omarchy plugin's folder/$literal/replay";
+        context.paths = {"/user/config/omarchy-replay/config.toml", "/user/data/omarchy-replay/history",
+            "/user/state/omarchy-replay", "/user/cache/omarchy-replay", "/user/runtime/omarchy-replay"};
+        context.historyDirectory = "/mounted disk/replay-history";
+        context.shownSettings.activeCpuPercent = 35;
+        context.shownSettings.excludedApps = {"PRIVATE_APP_NOT_FOR_PROMPT"};
+        context.shownSettings.excludedWindows = {{"PRIVATE_TITLE_NOT_FOR_PROMPT", "", "", "output", ""}};
+        for (const auto topic : {replay::AgentPromptTopic::Setup, replay::AgentPromptTopic::Resources,
+                                replay::AgentPromptTopic::Exclusions}) {
+            const auto prompt = replay::configurationAgentPrompt(topic, context);
+            QVERIFY(prompt.contains(context.executable));
+            QVERIFY(prompt.contains(context.paths.configFile));
+            QVERIFY(prompt.contains(context.historyDirectory));
+            QVERIFY(prompt.contains("https://github.com/rblalock/omarchy-replay"));
+            QVERIFY(!prompt.contains("/README.md"));
+            QVERIFY(!prompt.contains("./scripts/replay"));
+            QVERIFY(!prompt.contains("PRIVATE_APP_NOT_FOR_PROMPT"));
+            QVERIFY(!prompt.contains("PRIVATE_TITLE_NOT_FOR_PROMPT"));
+            QVERIFY(prompt.contains("using_last_valid_config"));
+            QVERIFY(prompt.contains("If it was offline, leave it offline"));
+            QVERIFY(prompt.contains("systemctl --user enable omarchy-replay.service"));
+            QVERIFY(prompt.contains("systemctl --user disable omarchy-replay.service"));
+            QVERIFY(prompt.contains("without --now"));
+            for (const QString& key : {"[recording]", "[storage]", "[indexing]", "[service]", "[exclusions]", "[agent]",
+                                      "output_identity", "retention_days", "min_free_mib", "cpu_ceiling_percent",
+                                      "title_regex", "compositor_instance"}) QVERIFY(prompt.contains(key));
+            // An installed path with spaces, apostrophes and a dollar sign must
+            // survive the shell assignment without expansion or a checkout cwd.
+            const QString assignment = prompt.section("```sh\n", 1).section('\n', 0, 0);
+            QProcess shell;
+            shell.setWorkingDirectory(temporary.path());
+            shell.start("/bin/sh", {"-c", assignment + "\nprintf '%s' \"$replay_bin\""});
+            QVERIFY(shell.waitForFinished(3000)); QCOMPARE(shell.exitCode(), 0);
+            QCOMPARE(QString::fromUtf8(shell.readAllStandardOutput()), context.executable);
+
+            const QByteArray reference = prompt.section("```toml\n", 1).section("\n```", 0, 0).toUtf8();
+            QVERIFY(!reference.isEmpty());
+            const auto fileName = temporary.filePath("prompt-reference.toml");
+            QFile file(fileName); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(reference); file.close();
+            const auto config = replay::loadReplayConfig(fileName).config;
+            const replay::ReplayConfig defaults;
+            QCOMPARE(config.intervalSeconds, defaults.intervalSeconds);
+            QCOMPARE(config.retentionDays, defaults.retentionDays);
+            QCOMPARE(config.maxDiskMiB, defaults.maxDiskMiB); QCOMPARE(config.minFreeMiB, defaults.minFreeMiB);
+            QCOMPARE(config.activeCpuPercent, defaults.activeCpuPercent); QCOMPARE(config.idleCpuPercent, defaults.idleCpuPercent);
+            QCOMPARE(config.requestCpuPercent, defaults.requestCpuPercent); QCOMPARE(config.pressureCpuPercent, defaults.pressureCpuPercent);
+            QCOMPARE(config.cpuCeilingPercent, defaults.cpuCeilingPercent); QCOMPARE(config.idleSeconds, defaults.idleSeconds);
+            QCOMPARE(config.loginStartup, defaults.loginStartup); QCOMPARE(config.excludedApps, defaults.excludedApps);
+            if (topic == replay::AgentPromptTopic::Resources) QVERIFY(prompt.contains("active CPU 35%"));
+        }
+    }
+
+    void sharedHistoryStartsEmptyWithoutRecordingAndKeyboardControlsAreSeparate() {
+        QTemporaryDir temporary;
+        ViewerEnvironment environment(temporary.path());
+        const QString directory = replay::replayPaths().historyDirectory;
+        FakeRecording service;
+        auto viewer = replay::createViewer(directory, service.hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(!viewer->property("historyLoading").toBool());
+        QCOMPARE(viewer->findChild<QLabel*>("recordedTimestamp")->text(), "Your history starts here");
+        QVERIFY(service.calls().isEmpty());
+        QVERIFY(!QFileInfo::exists(directory));
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_I);
+        auto* panel = viewer->findChild<QWidget*>("recordingPanel");
+        QVERIFY(panel->isVisible());
+        auto* action = viewer->findChild<QPushButton*>("recordingServiceAction");
+        auto* stop = viewer->findChild<QPushButton*>("stopRecordingService");
+        auto* indexing = viewer->findChild<QPushButton*>("indexServiceAction");
+        QCOMPARE(action->text(), "Start recording");
+        QVERIFY(!stop->isEnabled());
+        action->setFocus(); QTest::keyClick(action, Qt::Key_Space);
+        QTRY_COMPARE(action->text(), "Pause recording");
+        QTest::keyClick(action, Qt::Key_Space);
+        QTRY_COMPARE(action->text(), "Resume recording");
+        QTest::keyClick(action, Qt::Key_Space);
+        QTRY_COMPARE(action->text(), "Pause recording");
+        QTRY_COMPARE(indexing->text(), "Pause indexing");
+        indexing->setFocus(); QTest::keyClick(indexing, Qt::Key_Space);
+        QTRY_COMPARE(indexing->text(), "Resume indexing");
+        QCOMPARE(action->text(), "Pause recording");
+        QTest::keyClick(indexing, Qt::Key_Space);
+        QTRY_COMPARE(indexing->text(), "Pause indexing");
+        stop->setFocus(); QTest::keyClick(stop, Qt::Key_Space);
+        QTRY_COMPARE(action->text(), "Start recording");
+        QCOMPARE(service.calls(), QStringList({"start", "pause", "resume", "index-pause", "index-resume", "stop"}));
+        {
+            replay::RecorderOptions options; options.directory = directory; options.ocr = false; options.minFreeBytes = 0;
+            replay::Recorder recorder(options);
+            recorder.addFrame(replay::fixtureFrame(0), QDateTime::currentMSecsSinceEpoch()); recorder.finish();
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(viewer->property("displayedFrameId").toLongLong() > 0, 5000);
+        QVERIFY(viewer->findChild<QPushButton*>("deleteRecentHistory")->isEnabled());
+        bool reviewed = false;
+        QTimer::singleShot(0, [&] {
+            auto* interval = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+            QVERIFY(interval); interval->setIntValue(2);
+            QTimer::singleShot(0, [&] {
+                auto* confirmation = viewer->findChild<QMessageBox*>("confirmDeleteRecent");
+                QVERIFY(confirmation); reviewed = true;
+                QVERIFY(confirmation->text().contains("last 2 minutes"));
+                QCOMPARE(confirmation->defaultButton(), confirmation->button(QMessageBox::Cancel));
+                QTest::keyClick(confirmation, Qt::Key_Escape);
+            });
+            interval->accept();
+        });
+        auto* deletion = viewer->findChild<QPushButton*>("deleteRecentHistory");
+        deletion->setFocus(); QTest::keyClick(deletion, Qt::Key_Space);
+        QVERIFY(reviewed);
+        QCOMPARE(service.calls().size(), 6);
+        QVERIFY(QDir().mkpath("runs/design-review"));
+        QVERIFY(viewer->grab().save("runs/design-review/shared-recording-controls.png"));
+        viewer->close();
+        QVERIFY(!service.usedGuiThread);
+        QCOMPARE(service.calls().size(), 6);
+    }
+
+    void settingsKeyboardCancelAndRetentionReviewPreserveSavedConfig() {
+        QTemporaryDir temporary;
+        ViewerEnvironment environment(temporary.path());
+        auto document = replay::loadReplayConfig();
+        document.config.output = "SYNTHETIC-1";
+        document.config.outputIdentity = "synthetic-monitor-identity";
+        replay::saveReplayConfig(document.config, document.original);
+        const QByteArray original = replay::loadReplayConfig().original;
+        FakeRecording service;
+        service.status["compositor_instance"] = "synthetic-compositor-instance";
+        service.status["visible_windows"] = QJsonArray{QJsonObject{{"app_id", "org.example.SyntheticBrowser"},
+            {"title", "Synthetic visible window"}, {"address", "0x555"}}};
+        auto viewer = replay::createViewer(replay::replayPaths().historyDirectory, service.hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(!viewer->property("historyLoading").toBool());
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_I);
+        auto* settings = viewer->findChild<QPushButton*>("openReplaySettings");
+        bool visited = false, retentionReviewed = false;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = viewer->findChild<QDialog*>("replaySettings");
+            QVERIFY(dialog); visited = true;
+            auto* output = dialog->findChild<QComboBox*>("settingOutput");
+            QTRY_VERIFY(output->findData("SYNTHETIC-2") >= 0);
+            QVERIFY(!output->isEditable());
+            QVERIFY(output->itemText(output->findData("SYNTHETIC-1")).contains("1920 × 1080"));
+            QVERIFY(QDir().mkpath("runs/design-review"));
+            QVERIFY(dialog->grab().save("runs/design-review/shared-recording-settings.png"));
+            output->setFocus(); output->setCurrentIndex(output->findData("SYNTHETIC-2"));
+            auto* days = dialog->findChild<QSpinBox*>("settingRetentionDays"); days->setValue(7);
+            QTimer::singleShot(0, [&] {
+                auto* confirmation = viewer->findChild<QMessageBox*>("confirmShorterRetention");
+                QVERIFY(confirmation); retentionReviewed = true;
+                QVERIFY(confirmation->text().contains("permanently delete"));
+                QCOMPARE(confirmation->defaultButton(), confirmation->button(QMessageBox::Cancel));
+                QTest::keyClick(confirmation, Qt::Key_Escape);
+            });
+            auto* save = dialog->findChild<QDialogButtonBox*>("settingsButtons")->button(QDialogButtonBox::Save);
+            QVERIFY(save->icon().isNull());
+            save->setFocus(); QTest::keyClick(save, Qt::Key_Space);
+            QTest::keyClick(dialog, Qt::Key_Escape);
+        });
+        settings->setFocus(); QTest::keyClick(settings, Qt::Key_Space);
+        QVERIFY(visited); QVERIFY(retentionReviewed);
+        QCOMPARE(replay::loadReplayConfig().original, original);
+        QVERIFY(service.calls().isEmpty());
+        QTimer::singleShot(0, [&] {
+            auto* dialog = viewer->findChild<QDialog*>("replaySettings");
+            QVERIFY(dialog);
+            auto* output = dialog->findChild<QComboBox*>("settingOutput");
+            QTRY_VERIFY(output->findData("SYNTHETIC-2") >= 0);
+            output->setFocus(); output->setCurrentIndex(output->findData("SYNTHETIC-2"));
+            dialog->findChild<QTabWidget*>("settingsTabs")->setCurrentIndex(2);
+            QTimer::singleShot(0, [&] {
+                auto* picker = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+                QVERIFY(picker); picker->accept();
+            });
+            auto* choose = dialog->findChild<QPushButton*>("chooseExcludedWindow");
+            QVERIFY(choose->isEnabled()); choose->setFocus(); QTest::keyClick(choose, Qt::Key_Space);
+            QVERIFY(dialog->grab().save("runs/design-review/shared-recording-exclusions.png"));
+            auto* save = dialog->findChild<QDialogButtonBox*>("settingsButtons")->button(QDialogButtonBox::Save);
+            save->setFocus(); QTest::keyClick(save, Qt::Key_Space);
+        });
+        settings->setFocus(); QTest::keyClick(settings, Qt::Key_Space);
+        QTRY_COMPARE(service.calls(), QStringList({"reload"}));
+        QCOMPARE(replay::loadReplayConfig().config.output, "SYNTHETIC-2");
+        QVERIFY(replay::loadReplayConfig().config.excludedApps.contains("org.omarchy.screensaver"));
+        QVERIFY(replay::loadReplayConfig().config.outputIdentity.isEmpty());
+        const auto rules = replay::loadReplayConfig().config.excludedWindows;
+        QCOMPARE(rules.size(), 1);
+        QCOMPARE(rules[0].appId, "org.example.SyntheticBrowser"); QCOMPARE(rules[0].address, "0x555");
+        QCOMPARE(rules[0].compositorInstance, "synthetic-compositor-instance");
+        viewer->close();
+    }
+
     void fixtureContainsExactDuplicatesAndSmallChanges() {
         QCOMPARE(replay::fixtureFrameCount(), 16);
         QCOMPARE(replay::fixtureGroundTruth().size(), 16);
@@ -114,6 +366,129 @@ private slots:
         QCOMPARE(replay::fixtureFrame(9), replay::fixtureFrame(10));
         QVERIFY(replay::fixtureFrame(10) != replay::fixtureFrame(11));
         QVERIFY(replay::fixtureGroundTruth(11).value("tokens").toArray().contains("EDGE-7F8"));
+    }
+
+    void settingsPromptsContainInstructionsWithoutPrivateContextAndStorageSwitchIsReviewed() {
+        QTemporaryDir temporary;
+        ViewerEnvironment environment(temporary.path());
+        QVERIFY(QDir().mkpath("runs/design-review"));
+        auto document = replay::loadReplayConfig();
+        document.config.output = "DISCONNECTED-9";
+        replay::saveReplayConfig(document.config, document.original);
+        const QString originalHistory = replay::replayHistoryDirectory(document.config);
+        const QString newHistory = temporary.filePath("mounted-disk/replay-history");
+        QVERIFY(QDir().mkpath(newHistory));
+        FakeRecording service;
+        service.status["visible_windows"] = QJsonArray{QJsonObject{{"app_id", "org.example.Private"},
+            {"title", "PRIVATE_TITLE_NEVER_IN_PROMPT"}, {"address", "0xabcd"}}};
+        auto viewer = replay::createViewer(originalHistory, service.hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(!viewer->property("historyLoading").toBool());
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_I);
+        bool reviewed = false;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = viewer->findChild<QDialog*>("replaySettings"); QVERIFY(dialog);
+            auto* output = dialog->findChild<QComboBox*>("settingOutput");
+            QTRY_VERIFY(output->findData("SYNTHETIC-2") >= 0);
+            QCOMPARE(output->currentData().toString(), "DISCONNECTED-9");
+            QVERIFY(output->currentText().contains("disconnected"));
+            auto* folder = dialog->findChild<QLineEdit*>("settingStorageDirectory");
+            QCOMPARE(folder->text(), originalHistory); QVERIFY(folder->isReadOnly());
+            for (const QString& name : {"copySetupPrompt", "copyResourcesPrompt", "copyExclusionsPrompt"}) {
+                dialog->findChild<QPushButton*>(name)->click();
+                const QString prompt = QApplication::clipboard()->text();
+                QVERIFY(prompt.contains("https://github.com/rblalock/omarchy-replay"));
+                QVERIFY(!prompt.contains("/README.md"));
+                QVERIFY(!prompt.contains("./scripts/replay"));
+                QVERIFY(prompt.contains(replay::replayPaths().configFile));
+                QVERIFY(prompt.contains("daemon paths")); QVERIFY(prompt.contains("daemon status"));
+                QVERIFY(prompt.contains("Preserve capture intent"));
+                QVERIFY(!prompt.contains("PRIVATE_TITLE_NEVER_IN_PROMPT"));
+                QVERIFY(!prompt.contains("org.example.Private"));
+                if (name == "copyResourcesPrompt") {
+                    QVERIFY(prompt.contains("active CPU 40%")); QVERIFY(prompt.contains("window-switching responsiveness"));
+                    QVERIFY(prompt.contains("recording.log"));
+                }
+            }
+            auto* tabs = dialog->findChild<QTabWidget*>("settingsTabs");
+            tabs->setCurrentIndex(1);
+            QVERIFY(dialog->grab().save("runs/design-review/shared-recording-resources.png"));
+            tabs->setCurrentIndex(0);
+            QTimer::singleShot(0, [&] {
+                auto* picker = qobject_cast<QFileDialog*>(QApplication::activeModalWidget()); QVERIFY(picker);
+                picker->setDirectory(newHistory); picker->selectFile(newHistory);
+                QMetaObject::invokeMethod(picker, "accept", Qt::DirectConnection);
+            });
+            dialog->findChild<QPushButton*>("chooseStorageDirectory")->click();
+            QCOMPARE(folder->text(), newHistory);
+            QTimer::singleShot(0, [&] {
+                auto* confirmation = viewer->findChild<QMessageBox*>("confirmStorageDirectory"); QVERIFY(confirmation);
+                reviewed = true;
+                QVERIFY(confirmation->text().contains("stays in its original folder"));
+                QCOMPARE(confirmation->defaultButton(), confirmation->button(QMessageBox::Cancel));
+                QVERIFY(confirmation->button(QMessageBox::Save)->icon().isNull());
+                confirmation->button(QMessageBox::Save)->click();
+            });
+            dialog->findChild<QDialogButtonBox*>("settingsButtons")->button(QDialogButtonBox::Save)->click();
+        });
+        viewer->findChild<QPushButton*>("openReplaySettings")->click();
+        QVERIFY(reviewed);
+        QTRY_COMPARE(service.calls(), QStringList({"reload"}));
+        QCOMPARE(replay::loadReplayConfig().config.storageDirectory, newHistory);
+        QTRY_COMPARE(viewer->property("historyDirectory").toString(), newHistory);
+        QVERIFY(!QFileInfo::exists(originalHistory));
+        QCOMPARE(service.status.value("intent").toString(), "stopped");
+        viewer->close();
+    }
+
+    void malformedConfigKeepsCustomHistoryControlsAndRepairPromptAvailable() {
+        QTemporaryDir temporary;
+        ViewerEnvironment environment(temporary.path());
+        const auto paths = replay::replayPaths();
+        auto document = replay::loadReplayConfig();
+        document.config.output = "SYNTHETIC-2";
+        document.config.activeCpuPercent = 35;
+        document.config.storageDirectory = temporary.filePath("external-disk/history");
+        QVERIFY(QDir().mkpath(document.config.storageDirectory));
+        replay::saveReplayConfig(document.config, document.original);
+        replay::saveReplayConfig(document.config, {}, paths.stateDirectory + "/last-valid-config.toml");
+        const QByteArray malformed("[recording\noutput = \"unfinished\n");
+        QFile config(paths.configFile);
+        QVERIFY(config.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        QCOMPARE(config.write(malformed), malformed.size()); config.close();
+        FakeRecording service;
+        service.status["history_directory"] = document.config.storageDirectory;
+        service.status["config_error"] = "Current TOML cannot be parsed";
+        auto viewer = replay::createViewer(document.config.storageDirectory, service.hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(!viewer->property("historyLoading").toBool());
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_I);
+        QVERIFY(viewer->findChild<QWidget*>("recordingPanel")->isVisible());
+        QVERIFY(viewer->findChild<QLabel*>("recordingStatus")->text().contains("Current TOML cannot be parsed"));
+        bool inspected = false;
+        QTimer::singleShot(0, [&] {
+            auto* settings = viewer->findChild<QDialog*>("replaySettings"); QVERIFY(settings);
+            inspected = true;
+            QVERIFY(settings->findChild<QLabel*>("settingsError")->text().contains("last accepted settings"));
+            QVERIFY(!settings->findChild<QDialogButtonBox*>("settingsButtons")->button(QDialogButtonBox::Save)->isEnabled());
+            QCOMPARE(settings->findChild<QLineEdit*>("settingStorageDirectory")->text(), document.config.storageDirectory);
+            settings->findChild<QPushButton*>("copySetupPrompt")->click();
+            auto prompt = QApplication::clipboard()->text();
+            QVERIFY(prompt.contains(document.config.storageDirectory));
+            QVERIFY(prompt.contains(paths.configFile));
+            QVERIFY(prompt.contains("Repair its syntax"));
+            QVERIFY(prompt.contains(paths.stateDirectory + "/last-valid-config.toml"));
+            settings->findChild<QPushButton*>("copyResourcesPrompt")->click();
+            QVERIFY(QApplication::clipboard()->text().contains("active CPU 35%"));
+            QTest::keyClick(settings, Qt::Key_Escape);
+        });
+        viewer->findChild<QPushButton*>("openReplaySettings")->click();
+        QVERIFY(inspected); QVERIFY(service.calls().isEmpty());
+        QVERIFY(config.open(QIODevice::ReadOnly)); QCOMPARE(config.readAll(), malformed);
+        QVERIFY(!QFileInfo::exists(paths.historyDirectory));
+        viewer->close();
     }
 
     void keyboardSearchOpenAndTimeline() {
@@ -174,6 +549,15 @@ private slots:
 
         QTest::keyClick(results, Qt::Key_Down);
         QCOMPARE(results->currentRow(), 1);
+        // A selection changes synchronously; decoding completes later. Keep
+        // the last pixels on screen while withholding stale OCR/copy context.
+        QVERIFY(viewer->findChild<QWidget*>("evidenceView")->property("hasImage").toBool());
+        if (!viewer->property("displayedFrameId").toLongLong()) {
+            QVERIFY(!viewer->findChild<QLabel*>("mediaStatus")->isVisible());
+            QApplication::clipboard()->setText("untouched while decoding");
+            QTest::keyClick(results, Qt::Key_C, Qt::ControlModifier);
+            QCOMPARE(QApplication::clipboard()->text(), "untouched while decoding");
+        }
         QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), ids[1]);
 
         // Time navigation crosses outside the matches without losing the query
@@ -285,11 +669,11 @@ private slots:
         auto* details = viewer->findChild<QWidget*>("detailsPanel");
         auto* help = viewer->findChild<QWidget*>("helpPanel");
         auto* heading = viewer->findChild<QLabel*>("resultsHeading");
-        auto* clearSearch = viewer->findChild<QAction*>("clearSearch");
+        auto* clearSearch = viewer->findChild<QPushButton*>("clearSearch");
         QVERIFY(search && results && timeline && indexState && details && help && heading && clearSearch);
         QVERIFY(!viewer->findChild<QLabel*>("matchExcerpt"));
-        QCOMPARE(clearSearch->text(), "Clear search");
-        QVERIFY(!clearSearch->icon().isNull());
+        QCOMPARE(clearSearch->text(), "Clear");
+        QVERIFY(clearSearch->icon().isNull());
         QVERIFY(!search->isClearButtonEnabled());
         QVERIFY(!clearSearch->isVisible());
         for (const auto* label : viewer->findChildren<QLabel*>()) QVERIFY(label->text() != "Replay");
@@ -377,7 +761,7 @@ private slots:
         QVERIFY(viewer->isVisible());
         QCOMPARE(search->text(), "contin");
 
-        clearSearch->trigger();
+        clearSearch->click();
         QCOMPARE(search->text(), QString());
         QTRY_VERIFY(search->hasFocus());
         QVERIFY(!clearSearch->isVisible());
@@ -616,6 +1000,84 @@ private slots:
             QCOMPARE(results->currentItem()->data(Qt::UserRole).toLongLong(), qint64(17));
             QCOMPARE(search->text(), "uniqueneedle");
         }
+        viewer->close();
+    }
+
+    void rollingDeletionKeepsSearchPagesReachable() {
+        QTemporaryDir temporary;
+        ViewerEnvironment environment(temporary.path());
+        replay::RecorderOptions options;
+        options.directory = replay::replayPaths().historyDirectory;
+        options.resume = true; options.archiveFirst = true; options.deferredOcr = true;
+        options.minFreeBytes = 0;
+        {
+            replay::Recorder recorder(options);
+            for (int i = 0; i < 225; ++i) {
+                QImage image(64, 64, QImage::Format_RGBA8888);
+                image.fill(QColor(20 + i, 80, 120));
+                recorder.addFrame(image, 1000 + i * 2000);
+            }
+            recorder.finish();
+        }
+        sqlite3* database = nullptr;
+        QCOMPARE(sqlite3_open(QDir(options.directory).filePath("index.sqlite").toUtf8().constData(), &database), SQLITE_OK);
+        QCOMPARE(sqlite3_exec(database,
+            "UPDATE frames SET text='continuous retention fixture',ocr_state='ready';"
+            "INSERT INTO frame_text(rowid,text) SELECT id,text FROM frames", nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(database);
+        FakeRecording service;
+        auto viewer = replay::createViewer(options.directory, service.hooks());
+        viewer->show(); viewer->activateWindow();
+        // The hidden initial 200-row list must not cap ordinary time browsing.
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(225));
+        auto* search = viewer->findChild<QLineEdit*>("recallSearch");
+        auto* results = viewer->findChild<QListWidget*>("recallResults");
+        search->setText("continuous");
+        QTest::keyClick(search, Qt::Key_Return);
+        QTRY_COMPARE(viewer->property("totalMatches").toLongLong(), qint64(225));
+        QTest::keyClick(results, Qt::Key_PageDown);
+        QTRY_COMPARE(viewer->property("matchPageOffset").toLongLong(), qint64(100));
+        QTest::keyClick(results, Qt::Key_PageDown);
+        QTRY_COMPARE(viewer->property("matchPageOffset").toLongLong(), qint64(200));
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(201));
+        const auto expire = [&](qint64 from, qint64 until) {
+            replay::HistoryMaintenanceResult result;
+            for (int pass = 0; pass < 10; ++pass) {
+                result = replay::deleteHistoryRange(options.directory, from, until);
+                if (!result.more && !result.busy) return true;
+            }
+            return false;
+        };
+        QVERIFY(expire(0, 21000)); // First ten moments expire; the viewed ID moves to the previous page.
+        QTest::keyClick(viewer.get(), Qt::Key_F5);
+        QTRY_COMPARE(viewer->property("totalMatches").toLongLong(), qint64(215));
+        QTRY_COMPARE(viewer->property("matchPageOffset").toLongLong(), qint64(100));
+        QCOMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(201));
+        QCOMPARE(results->currentItem()->data(Qt::UserRole).toLongLong(), qint64(201));
+        QTest::keyClick(results, Qt::Key_PageDown);
+        QTRY_COMPARE(viewer->property("matchPageOffset").toLongLong(), qint64(200));
+        results->setCurrentRow(14);
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(225));
+        QVERIFY(expire(0, 441000));
+        QVERIFY(expire(449000, 450000)); // Delete the selection as well as the preceding complete pages.
+        const auto fallback = replay::searchFramePage(options.directory, "continuous", 100, 200,
+            replay::SearchMode::PrefixLastToken, 1000, 225);
+        QCOMPARE(fallback.offset, qint64(0)); QCOMPARE(fallback.totalMatches, qint64(4));
+        QCOMPARE(fallback.frames.size(), 4);
+        QTest::keyClick(viewer.get(), Qt::Key_F5);
+        QTRY_COMPARE(viewer->property("totalMatches").toLongLong(), qint64(4));
+        QTRY_COMPARE(viewer->property("matchPageOffset").toLongLong(), qint64(0));
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(221));
+        QCOMPARE(results->count(), 4);
+        QTest::keyClick(results, Qt::Key_Down);
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(222));
+        search->clear();
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(224));
+        QVERIFY(expire(447000, 448000));
+        QTest::keyClick(viewer.get(), Qt::Key_F5);
+        // Deleting the current unfiltered moment returns to the latest retained
+        // image, not row zero of the hidden oldest-frame cache.
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(223));
         viewer->close();
     }
 
@@ -1103,13 +1565,14 @@ private slots:
         {
             replay::Recorder recorder(options);
             recorder.addFrame(replay::fixtureFrame(0, QSize(640, 360)), 1000);
+            recorder.addFrame(replay::fixtureFrame(2, QSize(640, 360)), 2000);
             recorder.finish();
         }
         // Use an owned sleeping executable instead of a real video decoder.
         // Only the synthetic row's codec changes; no desktop pixels are read.
         sqlite3* database = nullptr;
         QCOMPARE(sqlite3_open(QDir(options.directory).filePath("index.sqlite").toUtf8().constData(), &database), SQLITE_OK);
-        QCOMPARE(sqlite3_exec(database, "UPDATE frames SET codec='h264'", nullptr, nullptr, nullptr), SQLITE_OK);
+        QCOMPARE(sqlite3_exec(database, "UPDATE frames SET codec='h264' WHERE id=1", nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(database);
         const QString binaryDirectory = temporary.filePath("bin");
         QVERIFY(QDir().mkpath(binaryDirectory));
@@ -1133,8 +1596,19 @@ private slots:
         qputenv("REPLAY_TEST_DECODER_PID", marker.toUtf8());
         auto viewer = replay::createViewer(options.directory);
         viewer->show();
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(2));
+        const QImage previousPixels = viewer->findChild<QWidget*>("recordedImage")->grab().toImage();
+        auto* timeline = viewer->findChild<QSlider*>("recallTimeline");
+        timeline->setFocus(); QTest::keyClick(timeline, Qt::Key_Home);
         QTRY_VERIFY(QFileInfo::exists(marker));
         QTRY_VERIFY(QFileInfo(marker).size() > 0);
+        QCOMPARE(viewer->property("displayedFrameId").toLongLong(), qint64(0));
+        QVERIFY(viewer->property("mediaLoading").toBool());
+        QVERIFY(!viewer->findChild<QLabel*>("mediaStatus")->isVisible());
+        QCOMPARE(viewer->findChild<QWidget*>("recordedImage")->grab().toImage(), previousPixels);
+        QApplication::clipboard()->setText("Previous pixels are not copyable context");
+        QTest::keyClick(timeline, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), "Previous pixels are not copyable context");
         QFile pidFile(marker);
         QVERIFY(pidFile.open(QIODevice::ReadOnly));
         const auto pid = pidFile.readAll().toLongLong();

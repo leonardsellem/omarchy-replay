@@ -39,6 +39,9 @@ struct RecorderOptions {
     // Opt-in lossless history: requires deferred OCR and the WebP codec.
     // Pending limits do not gate archive admission; total disk/free-space limits do.
     bool archiveFirst = false;
+    // Append to a private archive-first WebP history, creating it when absent.
+    // The default remains a finite trial that refuses nonempty directories.
+    bool resume = false;
     int maxPendingFrames = 16;
     quint64 maxPendingBytes = 64ULL * 1024 * 1024;
 };
@@ -151,6 +154,7 @@ public:
     Recorder(const Recorder &) = delete;
     Recorder &operator=(const Recorder &) = delete;
     AddFrameResult addFrame(const QImage &image, qint64 timestampMs);
+    void breakContinuity();
     void finish();
     QJsonObject statsJSON() const;
 
@@ -158,6 +162,22 @@ private:
     struct Impl;
     std::unique_ptr<Impl> d;
 };
+
+struct HistoryMaintenanceResult {
+    qint64 observationsRemoved = 0, framesRemoved = 0, filesRemoved = 0, gapsRemoved = 0;
+    quint64 bytesReclaimed = 0, diskBytes = 0;
+    bool more = false;
+    bool busy = false; // Retry later; earlier committed batches remain valid.
+};
+
+// Each call deletes a bounded batch. Expiry uses observation capture times;
+// originals shared by surviving observations remain available.
+HistoryMaintenanceResult maintainHistory(const QString &directory, qint64 expireBeforeMs,
+                                         int maxObservations = 1000, int maxFiles = 128);
+HistoryMaintenanceResult deleteHistoryRange(const QString &directory, qint64 fromInclusiveMs, qint64 toExclusiveMs,
+                                           int maxObservations = 1000, int maxFiles = 128);
+QJsonObject historyUsage(const QString &directory);
+void recordGap(const QString &directory, qint64 startMs, qint64 endMs, const QString &reason);
 
 QVector<FrameRecord> listFrames(const QString &directory, int limit = 200, int offset = 0);
 QVector<FrameRecord> searchFrames(const QString &directory, const QString &query, int limit = 100);

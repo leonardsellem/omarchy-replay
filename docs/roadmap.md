@@ -1,98 +1,77 @@
 # Omarchy Replay roadmap
 
-Updated 2026-09-19. This records the agreed product direction and the proposed implementation order. Installed runtime paths below are planned; the working prototype still lives in this repository and stores trials under `runs/trials/`.
+Updated 2026-09-20. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
 
-## Working now
+## Milestones 1–5: implemented locally
 
-- Finite recording of one explicitly selected display, with adjustable capture interval.
-- User-started trial durations up to four hours, with bounded disk use and a ten-minute default.
-- Lossless archive-first retention independent of OCR backlog, within a dataset disk allowance.
-- Native keyboard-driven timeline, prefix search, OCR highlights, and matching-line copy.
-- Replay viewer exclusion through an installed persistent Hyprland rule, verified against saved native captures; the synthetic fixture has a separate app identity.
-- Adaptive indexing with active/idle/request allowances and utilization-aware pressure backoff; optional verified whole-worker resource ceilings.
-- Opt-in exact whole-frame OCR reuse, with bounded provenance and highlight checks. The evening session had no whole-screen reuse candidates; region/scroll reuse remains research.
-- An independent indexing coordinator for each saved dataset, with persistent pause/resume/stop and OCR memory release after catch-up.
-- Local trial settings, numeric diagnostics, process samples, saved media, and OCR history.
+| Milestone | Current behavior |
+| --- | --- |
+| 1. Shared history | One appendable local archive across restarts, stable moment IDs, one capture owner, recoverable originals and a single OCR worker for shared history. |
+| 2. Background recorder and configuration | `omarchy-replay.service`, durable running/paused/stopped intent, optional login startup, validated TOML and XDG directories. Fresh installation starts with capture stopped. |
+| 3. Moving retention | Capture-time age window, independent disk/free-space limits, bounded expiry and media cleanup, in-flight indexing protection. Capacity exhaustion pauses capture without shortening retention. |
+| 4. Native controls and lifecycle | Super+Alt+R summon/dismiss, recording and indexing controls plus Settings under I, lock/sleep/display/compositor gates and explicit gaps. Temporary conditions never override a manual pause. |
+| 5. Exclusions and deletion | Mandatory Replay masking, default 1Password app identifier, configurable exact app/title rules, visible-window pickers and confirmed delete-recent action. |
 
-The five-minute real trial retained all sixty observations and eventually indexed them all. Continuous active-work OCR capacity, storage over long periods, and unattended recording lifecycle remain unproven. See [the trial report](personal-trial-review-5.md).
+The service uses lossless archive-first originals independently of OCR backlog. Prefix search, timeline navigation, OCR highlights and matching-line copy remain available. Adaptive OCR keeps the configured active/idle/request/pressure allowances and verified worker-ceiling reporting. OCR memory is released after catch-up. Legacy finite trials keep their existing indexing policies; they do not share the new coordinator's global worker budget.
 
-## Next: a native background recording service
+These milestones have synthetic storage, lifecycle, configuration and native widget checks. Generated compositor masks have native pixel checks on isolated fictional desktops, including popups, movement, reload and scaling. See [service implementation and verification](background-recording-implementation.md). This does not establish all-day throughput or prove real hardware suspend/resume on every machine.
 
-The intended product runs in the user's desktop session independently of the viewer. One coordinator owns recording, history, and the overall indexing budget. Initially it permits one OCR worker across all sessions; the current per-dataset services are a prototype, not the final global resource policy.
+## Next: exercise the installed service during ordinary work
 
-- One searchable history spanning recording sessions and media rotation, with restart recovery.
-- A user service, proposed as `oma-rewind.service`, with explicit start/stop and optional user-enabled login startup.
-- Native recording start/pause/resume/stop, visible recording state, and quick keyboard access. Capture controls and indexing controls have distinct meanings.
-- Automatic pause on lock; tested sleep/wake, selected-display disconnect/reconnect, and compositor-restart behavior.
-- Configurable history duration plus a separate disk allowance. Expiration/deletion removes original media, text, highlight geometry and pending work together; in-flight work cannot republish deleted history.
-- If the disk allowance fills before the requested history expires, pause capture and show the conflict. Do not silently shorten retention.
-- Capture exclusions as detailed below, and a quick delete-recent-interval action.
+Use progressively longer sessions to measure retained observations, oldest pending age, OCR throughput, CPU, memory, disk growth and foreground responsiveness together. Verify actual lock/unlock, sleep/wake and display reconnect during normal use. Revisit unexpected gaps and failures before treating it as an unattended recorder.
 
-Build the shared library/coordinator and storage lifecycle first, then finish recording controls and native lifecycle integration. Validate progressively longer bounded ordinary-work sessions before making all-day claims.
+Long-history timeline/search scaling and storage growth remain validation priorities. Agent-assisted recall is the next feature area, using the evidence interface described below. S3 offload and synthesis remain later work.
 
 ### Recording across lock, sleep and restart
 
-The experience should require little attention while keeping the user's recording choice intact. Separate saved recording intent (running, manually paused, stopped) from temporary conditions that prevent capture. These transitions are requirements for the background-service milestone; they are not implemented by the finite trial helper.
+Saved recording intent is separate from conditions that temporarily block capture:
 
-| Event | Intended recording behavior |
+| Event | Implemented policy |
 | --- | --- |
-| User starts recording | Capture the selected display once it is available, the session is unlocked and exclusion rules are ready. Show recording state. |
-| Desktop locks | Stop acquiring frames before locked-session content can be retained. Record the gap without repeating the last frame as continuous observation. |
-| Desktop unlocks | Resume automatically only if recording was enabled before the temporary lock. Preserve a manual pause or stop. |
-| Suspend or hibernate | Stop capture, safely finish or abandon in-flight capture work, and release display resources. Preserve retained history and saved intent. |
-| Wake | Wait for an unlocked session, the selected display and ready exclusions; then resume if recording was previously enabled. Do not replay missed capture ticks in a burst. |
-| Selected display sleeps or disconnects | Pause that display's capture. Do not silently switch to another monitor. Resume when the same display is available and capture conditions are satisfied. |
-| Compositor/service restarts unexpectedly | Recover retained history and the previous recording choice, reconnect safely, and show the gap. Avoid duplicate capture/index workers. |
-| Logout or shutdown | Finalize available history and stop cleanly. On the next login, start only according to the explicit login-startup setting and saved user intent. |
-| User pauses or stops | Stay paused/stopped through lock, wake, reconnect and restart until the user changes that choice. |
-| Viewer opens or closes | Recording state is unchanged; the viewer remains excluded from native capture when its rule is installed. |
+| Explicit Start/Resume | Capture the selected display only after desktop, session and compositor-mask checks pass. |
+| Lock or inactive session | Stop retaining frames, discard a sample spanning an invalidating transition, and record the gap. |
+| Unlock | Resume only when saved intent is running. |
+| Omarchy screensaver visible on the recorded display | Pause capture. Resume after it closes only when saved intent is running and other environment checks pass. |
+| Suspend/shutdown signal | Stop capture and release display resources; preserve retained history and intent. |
+| Wake | Wait for unlocked/active session, the same display and verified masks. Never burst through missed ticks. |
+| Display disconnect, sleep or replacement | Wait; never silently switch outputs. The first verified selection pins hardware identity. |
+| Compositor restart/reload | Reconnect to the verified current Wayland socket and revalidate masking before retaining another image. |
+| Coordinator restart | Reopen the shared archive, restore saved intent and indexing pause, and record the downtime gap. |
+| Logout | The user service follows the graphical session. Next login follows the explicit login-startup setting and saved intent. |
+| Manual Pause/Stop | Remain paused/stopped until an explicit change, across unlock, wake and restart. |
+| Viewer opens/closes | Do not change recording permission. Mask the viewer itself. |
 
-Ordinary input inactivity does not stop capture by default; it can change the indexing allowance. Previously retained history may continue indexing while the desktop is locked, within its separate policy. No processing occurs while the machine is suspended. The UI should make a temporary wait distinguishable from a manual pause without requiring repeated prompts. Verify rapid transitions, wake while still locked and failure during finalization, as well as ordinary paths.
+Inactivity alone does not stop capture; it changes the OCR allowance. Retained images may continue indexing while locked. Native monitoring combines compositor lock notifications, logind session/sleep signals and bounded pre/post-capture observations. Unknown state blocks capture. Actual host suspend/wake testing remains part of ordinary-use validation; synthetic transitions cover the control policy.
 
-### Moving retention window
+### Retention and capacity
 
-Retention is a sliding age window based on **capture time**. With “keep 30 days,” moments older than the current time minus 30 days expire as the window advances. Viewing or indexing an old moment does not reset its age. This applies across recording sessions; the prototype does not implement automatic expiry yet.
+The default is a moving **30-day** capture-time window, **10 GiB** dataset allowance and **1 GiB** free-space floor. Users can adjust all three. Viewing/indexing does not renew an observation's age. Repeated observations can share an image: the original remains until its final retained reference expires. Expiration removes text, highlight geometry, queued work and unneeded media together; in-flight OCR cannot restore deleted evidence. Cleanup uses bounded batches and incremental SQLite reclamation.
 
-Bounded maintenance removes expired original media, OCR text, highlight geometry, previews and queued work together, and catches up after downtime. Shared media segments must preserve any newer, unexpired moments. An in-flight index job cannot restore deleted history. Explain the effect before applying a shorter retention window, and keep explicit deletion available separately.
+A full disk allowance pauses capture with an explanation. It does not evict unexpired history silently. Shortening retention in Settings and deleting recent history both require a concrete confirmation. File edits are an explicit configuration change and apply through validation/reload. Future S3 offload must preserve capture-time age and eventually expire managed remote copies too.
 
-The disk allowance is an independent ceiling. If it fills before history reaches the chosen age, pause recording and explain the conflict instead of silently shortening the window. Future S3 offload can move retained media off the machine; offloading and local cache eviction do not extend or reset its retention age. Expiration must eventually cover managed remote copies too.
+### Exclusion scope
 
-## Capture exclusions and Replay self-capture
+Replay's viewer and Omarchy's screensaver (`org.omarchy.screensaver`) are always excluded, including with a customized or empty app list. The default app list also includes `com.onepassword.OnePassword`; alternate identities and other password managers require explicit matching and validation. Settings accepts exact app IDs and title regular expressions, plus local visible-window pickers. A particular window can be bound to its compositor instance/address only with an app/title guard; stale rules block capture until corrected.
 
-Opening Replay on the recorded monitor previously captured the viewer itself, producing recursive history. A persistent Hyprland rule now masks the exact Replay viewer app identity before native screen copying when installed. Synthetic native capture verified this behavior on the development host. Earlier recordings remain unchanged.
+For non-Replay exclusions, a matching potentially visible window pauses the selected output. Compositor `no_screen_share` masks also hide matching pixels before storage/OCR, protecting transitions such as animations and popups. Loaded masks are verified before capture. Unsupported patterns or missing verification block recording. App/title masks for address-bound rules deliberately cover other matching windows too; masks also affect other screen-sharing tools that honor this compositor setting, even while Replay is stopped.
 
-Confirmed roadmap requirements:
+Exclusions apply to future captures. Existing history changes only through retention or explicit deletion. Broader password-manager identity coverage, browser private-mode behavior and other capture backends remain future validation/work.
 
-- Exclude Replay's own viewer by default, across all viewer instances. An unfocused tiled or floating viewer can still be visible; checking only the focused app is insufficient.
-- Let the user select **Never record this app**, including the supplied example **1Password**, and exclude a particular window when needed. Make the scope clear: all windows of an app versus one window or a saved matching rule.
-- Offer sensible, visible defaults. Replay self-exclusion is the first requirement; password managers such as 1Password, Bitwarden and KeePassXC are candidate defaults whose identities and behavior must be verified. Keep the default list and user overrides inspectable in native settings and `~/.config/oma-rewind/config.toml`.
-- Apply exclusions before excluded pixels reach retained media, thumbnails, OCR or derived recall context. Filtering search results alone does not implement exclusion.
-- Show recording/exclusion status and distinguish intentionally excluded periods from capture failures, storage limits and pending OCR. A skipped interval must not look like continuous observation of the previous frame.
-- Make future capture rules distinct from an explicit action to delete previously retained history. Changes must not silently delete the user's old recordings.
-
-Implemented first step: `config/hypr/replay-viewer.lua` matches only the viewer's initial app identity, `omarchy-replay`; the fixture now uses `omarchy-replay-fixture`. The idempotent installer loads this rule from `~/.config/oma-rewind/hypr/replay-viewer.lua` after existing configuration, with backups and reload/error checks. This is compositor masking, so recorded pixels are black in the viewer's rectangle. It also affects other screen-sharing tools honoring the same compositor setting; it does not reconstruct windows behind Replay.
-
-Synthetic native-backend checks verify retained WebP/extracted pixels for tiled and unfocused viewers, multiple instances, floating/straddling windows across two outputs, monitor moves, config reload, reopening and 125% scaling. Actual search context menus are also masked at 100% and 125%. Ordinary fixture pixels remain available. General browser-extension, password-manager and alternative-backend guarantees are not established by this viewer test. Omarchy's existing 1Password/Bitwarden rules remain useful input to the future default list, not a substitute for that validation. See the [native integration report](native-integration-iteration.md).
-
-Remaining exclusion work: configurable rules and settings, recording/exclusion status, other app and popup identities, additional compositor lifecycle cases, and an explicit unsupported-backend policy. A failed or absent installation must not be described as protection; until the rule is installed successfully on another desktop, close Replay or place it entirely on an unrecorded monitor. Future rule changes do not delete previously retained history.
-
-## Settings and filesystem layout
-
-The user requested `~/.config/oma-rewind`. Proposed layout follows the corresponding XDG overrides:
+### Files and settings
 
 | Purpose | Default location |
 | --- | --- |
-| User settings | `~/.config/oma-rewind/config.toml` |
-| Search index and retained recordings | `~/.local/share/oma-rewind/` |
-| Bounded diagnostic logs and durable service state | `~/.local/state/oma-rewind/` |
-| Disposable previews/cache | `~/.cache/oma-rewind/` |
-| Live process state and control sockets | `$XDG_RUNTIME_DIR/oma-rewind/` |
+| Settings | `~/.config/omarchy-replay/config.toml` |
+| Shared index and originals | `~/.local/share/omarchy-replay/history/` |
+| Durable intent and bounded logs | `~/.local/state/omarchy-replay/` |
+| Disposable cache | `~/.cache/omarchy-replay/` |
+| Control socket and process lock | `$XDG_RUNTIME_DIR/omarchy-replay/` |
 
-Settings cover selected monitor, capture interval, retention duration, disk allowance, indexing CPU allowances, exclusions, and preferred coding agent. The native settings UI and editable config file use one validated configuration model. The compact **I** panel is the agreed home for detailed status, controls, and settings; ordinary recall stays uncluttered. Global summon/dismiss access remains keyboard driven.
-
-Service state, recordings, and caches are separate from configuration. Invalid changes should produce an actionable error while preserving the last usable settings. Restart-sensitive changes must be distinguished from settings that can apply during a session.
+Absolute XDG overrides are respected. `[storage].directory` can select a folder on another mounted local disk. Switching folders keeps the previous archive in place; a missing disk pauses capture and indexing until the same history returns. The installer migrates the earlier `oma-rewind` directories without merging archives. See [architecture](architecture.md#storage-location-and-configuration) for details. Settings and TOML share one validation model. Writes are private/atomic and preserve unknown values; conflicting concurrent edits are rejected. A bad edit leaves the last valid configuration in use, including after restart. Settings includes display selection, the visible history path and Open folder, plus copyable prompts for setup, exclusions and resource tuning. The main viewer opens centered and floating, with text controls. Preferred-agent configuration is reserved; it does not yet invoke an agent.
 
 ## Agent-assisted recall using the user's coding agents
+
+Installed users do not need the source repository. Settings' configuration prompts carry resolved paths, the installed executable, supported TOML options and diagnostic steps, with the remote repository as an optional source reference. Future recall tools and agent instructions must follow the same installation boundary.
 
 Confirmed direction: reuse the coding agent or agents already installed/configured on the user's computer. Discover available integrations and let the user select a preferred agent; do not assume every machine has one universal OS-level agent default. Reuse that agent's configured model/provider and authentication.
 
@@ -112,7 +91,7 @@ Recall answers should cite captured moments and distinguish visible evidence fro
 
 The history remains local. If the selected coding agent uses a remote model, its requested evidence follows that configured provider path; a locally installed agent does not necessarily imply local model inference. Send only the evidence needed for the current task.
 
-Agent-assisted recall follows the shared history/configuration foundation. It is not implemented in the recording prototype.
+Agent-assisted recall is the next product milestone after validating the shared-history service. The structured retrieval tools and agent adapter are not implemented yet.
 
 ### Practical agent workflows to revisit at that milestone
 
@@ -142,4 +121,4 @@ The [post-trial efficiency research](pipeline-efficiency-research.md) proposes s
 
 ## Prototype trials
 
-Use the finite prototype command in [the personal trial guide](personal-trial.md). It collects local diagnostics for recording, indexing and recall. The full recording service, config-file/settings UI, rolling retention, and coding-agent integration are not implemented yet. Enabling a trial does not enable login recording. Select a project license before a public release; none has been adopted yet.
+Use the finite prototype command in [the personal trial guide](personal-trial.md). It collects local diagnostics for recording, indexing and recall. Shared recording, configuration/settings, rolling retention and exclusions are implemented separately from finite trials. Coding-agent integration remains planned. Enabling a trial does not enable login recording. Select a project license before a public release; none has been adopted yet.

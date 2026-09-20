@@ -147,9 +147,14 @@ struct WaylandCapture::Impl {
         wl_callback_destroy(callback);
     }
 
-    void connect(int timeoutMs) {
+    void connect(int timeoutMs, const QString &socketName = {}) {
         const auto deadline = deadlineFor(timeoutMs);
-        display = wl_display_connect(nullptr);
+        const QByteArray socket = socketName.toLocal8Bit();
+        const bool inheritedFd = !socket.isEmpty() && qEnvironmentVariableIsSet("WAYLAND_SOCKET");
+        const QByteArray oldFd = qgetenv("WAYLAND_SOCKET");
+        if (inheritedFd) qunsetenv("WAYLAND_SOCKET");
+        display = wl_display_connect(socket.isEmpty() ? nullptr : socket.constData());
+        if (inheritedFd) qputenv("WAYLAND_SOCKET", oldFd);
         if (!display) throw std::runtime_error("Cannot connect to WAYLAND_DISPLAY");
         registry = wl_display_get_registry(display);
         if (!registry) throw std::runtime_error("Cannot get Wayland registry");
@@ -313,9 +318,9 @@ struct WaylandCapture::Impl {
     }
 };
 
-WaylandCapture::WaylandCapture(QString outputName) : impl_(std::make_unique<Impl>()) {
+WaylandCapture::WaylandCapture(QString outputName, QString waylandDisplay) : impl_(std::make_unique<Impl>()) {
     if (outputName.isEmpty()) throw std::runtime_error("Explicit output name is required");
-    impl_->connect(3000);
+    impl_->connect(3000, waylandDisplay);
     if (!impl_->shm || !impl_->sourceManager || !impl_->captureManager)
         throw std::runtime_error("Compositor lacks ext-image-copy-capture, output capture sources, or SHM");
     for (const auto& output : impl_->outputs)

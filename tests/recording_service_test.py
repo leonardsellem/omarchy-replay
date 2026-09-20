@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Shared recorder lifecycle against fictional pixels and injected desktop signals."""
+import json
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+
+BINARY = str(Path(sys.argv[1]).resolve())
+
+
+def eventually(check, timeout=15):
+    until = time.monotonic() + timeout
+    while time.monotonic() < until:
+        result = check()
+        if result:
+            return result
+        time.sleep(.1)
+    raise AssertionError('condition did not settle within its deadline')
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix='replay-recording-service-') as temporary:
+        root = Path(temporary)
+        env = dict(os.environ, QT_QPA_PLATFORM='offscreen', QT_QPA_PLATFORMTHEME='', QT_STYLE_OVERRIDE='Fusion', OMP_THREAD_LIMIT='1')
+        for kind in ('CONFIG', 'DATA', 'STATE', 'CACHE', 'RUNTIME'):
+            path = root / kind.lower(); path.mkdir(mode=0o700)
+            env['XDG_' + kind + ('_DIR' if kind == 'RUNTIME' else '_HOME')] = str(path)
+        config = root / 'config/omarchy-replay/config.toml'; config.parent.mkdir()
+        valid_config = ('[recording]\noutput="TEST-1"\ninterval_seconds=0.5\n'
+                        '[storage]\nretention_days=1\nmax_disk_mib=64\nmin_free_mib=0\n'
+                        '[indexing]\ncpu_ceiling_percent=0\n'
+                        '[exclusions]\napps=[]\n')
+        config.write_text(valid_config)
+        history = root / 'data/omarchy-replay/history'
+        sensor = root / 'environment.json'
+        monitor = dict(id=1, name='TEST-1', make='Synthetic', model='Fixture', serial='TEST-1', description='Synthetic display',
+                       width=1920, height=1080, scale=1.0, transform=0, x=0, y=0, disabled=False, dpmsStatus=True, mirrorOf='none')
+        generation = 0
+        screensaver = dict(address='0x1234', **{'class': 'org.omarchy.screensaver'},
+                           initialClass='org.omarchy.screensaver', title='Synthetic screensaver',
+                           mapped=True, hidden=False, visible=True, at=[0, 0], size=[1920, 1080], monitor=1)
+
+        def desktop(**fields):
+            nonlocal generation
+            generation += 1
+            value = dict(known=True, generation=generation, locked=False, sleeping=False, monitors=[monitor], windows=[])
+            value.update(fields)
+            temp = sensor.with_suffix('.tmp'); temp.write_text(json.dumps(value)); temp.replace(sensor)
+
+        def call(action, *args, success=True):
+            result = subprocess.run([BINARY, 'daemon', action, *args], env=env, capture_output=True, text=True, timeout=15)
+            if success:
+                assert result.returncode == 0, result.stderr
+                return json.loads(result.stdout)
+            assert result.returncode != 0, 'invalid/destructive action was accepted'
+
+        def count():
+            with sqlite3.connect(history / 'index.sqlite', timeout=2) as db:
+                return db.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
+
+        def status():
+            return call('status')
+
+        desktop()
+        paths = call('paths')
+        assert paths['history'] == str(history) and paths['default_history'] == str(history)
+        assert paths['state'] == str(root / 'state/omarchy-replay')
+        assert not (history / 'index.sqlite').exists(), 'paths initialized an archive'
+        config.write_text('[recording]\ninterval_seconds="invalid"\n')
+        call('paths', success=False)
+        assert not (history / 'index.sqlite').exists(), 'invalid paths selected a new archive'
+        assert not (root / 'state/omarchy-replay').exists(), 'paths wrote fallback state'
+        config.write_text(valid_config)
+        unrelated = root / 'unrelated-folder'; unrelated.mkdir()
+        (unrelated / 'keep.txt').write_text('Keep this unrelated folder intact.')
+        config.write_text(valid_config.replace('[storage]\n', '[storage]\ndirectory=' + json.dumps(str(unrelated)) + '\n'))
+        call('init', success=False)
+        assert [entry.name for entry in unrelated.iterdir()] == ['keep.txt'], 'init modified an unrelated folder'
+        alias = root / 'symlink-history'; alias.symlink_to(unrelated, target_is_directory=True)
+        config.write_text(valid_config.replace('[storage]\n', '[storage]\ndirectory=' + json.dumps(str(alias)) + '\n'))
+        call('init', success=False)
+        config.write_text(valid_config)
+        initialized = call('init')
+        assert initialized['recording_started'] is False and count() == 0
+        assert status()['running'] is False, 'initialization started recording service'
+        child = None
+        logs = (root / 'coordinator.log').open('w+')
+
+        def launch():
+            nonlocal child
+            child = subprocess.Popen([BINARY, 'daemon', 'run', '--synthetic', '--synthetic-environment', str(sensor)],
+                                     env=env, stdout=logs, stderr=logs)
+            eventually(lambda: child.poll() is None and status().get('running'))
+
+        try:
+            launch()
+            assert status()['intent'] == 'stopped' and count() == 0
+            second = subprocess.run([BINARY, 'daemon', 'run', '--synthetic'], env=env, capture_output=True, timeout=8)
+            assert second.returncode != 0 and count() == 0, 'second coordinator acquired shared history'
+            call('start'); eventually(lambda: count() >= 3)
+            call('pause'); retained = count(); time.sleep(1.2)
+            assert count() == retained and status()['intent'] == 'paused'
+            desktop(locked=True); call('resume')
+            eventually(lambda: status()['state'] == 'locked')
+            assert count() == retained
+            desktop(); eventually(lambda: count() > retained)
+            desktop(windows=[screensaver]); eventually(lambda: status()['state'] == 'excluded_window')
+            retained = count(); time.sleep(.7)
+            assert count() == retained and status()['intent'] == 'running', 'screensaver retained frames or changed intent'
+            desktop(); eventually(lambda: count() > retained)
+            desktop(windows=[screensaver]); eventually(lambda: status()['state'] == 'excluded_window')
+            call('pause'); retained = count()
+            desktop(); time.sleep(.7)
+            assert count() == retained and status()['intent'] == 'paused', 'screensaver close cleared manual pause'
+            call('resume'); eventually(lambda: count() > retained)
+            desktop(sleeping=True); eventually(lambda: status()['state'] == 'sleeping')
+            retained = count(); desktop(locked=True); eventually(lambda: status()['state'] == 'locked')
+            time.sleep(.7); assert count() == retained, 'wake while locked captured a screen'
+            desktop(); eventually(lambda: count() > retained)
+            desktop(monitors=[]); eventually(lambda: status()['state'] == 'output_unavailable')
+            retained = count(); time.sleep(.7); assert count() == retained
+            desktop(); eventually(lambda: count() > retained)
+            call('pause'); call('index-pause'); retained = count()
+            child.terminate(); child.wait(timeout=15)
+            launch(); time.sleep(.8)
+            assert status()['intent'] == 'paused' and status()['indexing_paused'] and count() == retained
+            # A temporary environment change must never clear a manual pause.
+            desktop(locked=True); desktop(); time.sleep(.7)
+            assert count() == retained
+            config.write_text('[recording]\ninterval_seconds="invalid"\n')
+            assert call('reload')['config_error'], 'invalid config replaced usable settings'
+            child.terminate(); child.wait(timeout=15)
+            launch()
+            assert status()['config_error'] and status()['intent'] == 'paused', 'restart lost last valid config/intent'
+            config.write_text(valid_config); call('reload')
+            assert not status()['config_error']
+            call('delete-recent', '--seconds', '300', success=False)
+            assert count() == retained
+            with sqlite3.connect(history / 'index.sqlite') as db:
+                greatest_id = db.execute('SELECT MAX(id) FROM frames').fetchone()[0]
+            call('delete-recent', '--seconds', '300', '--confirmed')
+            eventually(lambda: count() == 0 and not status()['deleting'])
+            call('resume'); eventually(lambda: count() >= 2); call('pause')
+            with sqlite3.connect(history / 'index.sqlite') as db:
+                assert db.execute('SELECT MIN(id) FROM frames').fetchone()[0] > greatest_id, 'moment IDs were reused'
+            call('index-resume')
+            eventually(lambda: status()['progress'].get('pending') == 0, 30)
+            assert status()['progress'].get('failed') == 0
+            # Switching archive folders is explicit, keeps the old archive, and
+            # preserves both the recording and index control choices.
+            original_history = history
+            original_count = count()
+            external = root / 'mounted-disk/history'; external.mkdir(parents=True)
+            config.write_text(valid_config.replace('[storage]\n', '[storage]\ndirectory=' + json.dumps(str(external)) + '\n'))
+            switched = call('reload'); history = external
+            assert switched['history_directory'] == str(external) and switched['intent'] == 'paused'
+            assert switched['storage_available'] and not switched['config_error'] and count() == 0
+            assert call('paths')['history'] == str(external)
+            custom_config = config.read_text()
+            config.write_text('[recording]\ninterval_seconds="invalid"\n')
+            state_file = root / 'state/omarchy-replay/recording.json'
+            saved_intent = state_file.read_bytes()
+            discovered = call('paths')
+            assert discovered['history'] == str(external) and discovered['using_last_valid_config']
+            assert discovered['config_error'] and state_file.read_bytes() == saved_intent
+            assert config.read_text() == '[recording]\ninterval_seconds="invalid"\n'
+            assert count() == 0, 'read-only path fallback started capture'
+            config.write_text(custom_config); call('reload')
+            call('resume'); eventually(lambda: count() >= 2)
+            call('index-pause'); retained = count()
+            # Simulate a removed volume with an empty directory left at the same
+            # mount path. Neither the service nor init may initialize it again.
+            disconnected = external.with_name('disconnected-history')
+            external.rename(disconnected); external.mkdir()
+            eventually(lambda: status()['state'] == 'storage-unavailable')
+            time.sleep(.7)
+            assert list(external.iterdir()) == [], 'capture wrote into a replacement mount folder'
+            call('init', success=False)
+            assert list(external.iterdir()) == [], 'init replaced a disconnected archive'
+            child.terminate(); child.wait(timeout=15); launch()
+            eventually(lambda: status()['state'] == 'storage-unavailable')
+            assert status()['intent'] == 'running' and status()['indexing_paused']
+            assert list(external.iterdir()) == [], 'restart replaced a disconnected archive'
+            external.rmdir(); disconnected.rename(external)
+            eventually(lambda: count() > retained)
+            assert status()['storage_available']
+            # A second live switch should continue recording, while the old
+            # archive stops growing and remains readable.
+            second_history = root / 'second-disk-history'; second_history.mkdir()
+            config.write_text(valid_config.replace('[storage]\n', '[storage]\ndirectory=' + json.dumps(str(second_history)) + '\n'))
+            switched = call('reload'); previous_history = history; history = second_history
+            assert switched['intent'] == 'running' and switched['indexing_paused']
+            eventually(lambda: count() >= 2); call('pause')
+            with sqlite3.connect(previous_history / 'index.sqlite') as db:
+                previous_count = db.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
+            time.sleep(.7)
+            with sqlite3.connect(previous_history / 'index.sqlite') as db:
+                assert db.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == previous_count
+            with sqlite3.connect(original_history / 'index.sqlite') as db:
+                assert db.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == original_count
+            call('stop'); call('shutdown'); child.wait(timeout=15)
+            assert child.returncode == 0 and not status()['running']
+            with sqlite3.connect(history / 'index.sqlite') as db:
+                assert db.execute('SELECT COUNT(*) FROM history_gaps').fetchone()[0] > 0
+            # A pending deletion recorded under the pre-rename default path
+            # must finish against that same archive through its migration link.
+            (root / 'data/oma-rewind').symlink_to(root / 'data/omarchy-replay', target_is_directory=True)
+            state_file = root / 'state/omarchy-replay/recording.json'
+            saved = json.loads(state_file.read_text())
+            saved['deletion'] = dict(from_ms=0, to_ms=1, directory=str(root / 'data/oma-rewind/history'))
+            state_file.write_text(json.dumps(saved)); config.write_text(valid_config)
+            launch(); eventually(lambda: not status()['deleting'])
+            assert status()['history_directory'] == str(original_history) and status()['intent'] == 'stopped'
+            with sqlite3.connect(original_history / 'index.sqlite') as db:
+                assert db.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == original_count
+            call('shutdown'); child.wait(timeout=15)
+            logs.flush(); logs.seek(0)
+            assert 'QIODevice::read' not in logs.read(), 'idle coordinator repeatedly read an unopened worker'
+            print('PASS shared recording, lifecycle gaps, persistent controls, config recovery, deletion, indexing and safe disk switching')
+        finally:
+            if child is not None and child.poll() is None:
+                child.terminate()
+                try: child.wait(timeout=15)
+                except subprocess.TimeoutExpired: child.kill(); child.wait(timeout=5)
+            logs.seek(0)
+            if child and child.returncode not in (None, 0):
+                print(logs.read()[-4000:], file=sys.stderr)
+            logs.close()
+
+
+if __name__ == '__main__':
+    main()

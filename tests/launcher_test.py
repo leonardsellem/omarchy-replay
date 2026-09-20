@@ -21,6 +21,9 @@ class LauncherTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='replay-launcher-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.environment = patch.dict(os.environ, {
+            'XDG_CONFIG_HOME': str(self.root / 'config'), 'XDG_DATA_HOME': str(self.root / 'data')})
+        self.environment.start(); self.addCleanup(self.environment.stop)
         self.runs = self.root / 'runs'
         self.trial = self.runs / 'previous'
         self.dataset = self.trial / 'dataset'
@@ -68,6 +71,64 @@ class LauncherTest(unittest.TestCase):
              patch.object(open_replay, 'launch_viewer', return_value=0) as launch:
             self.assertEqual(open_replay.main([]), 0)
             self.assertEqual(launch.call_args.args[1:], (self.dataset, self.config))
+
+    def test_shared_history_is_selected_without_capture(self):
+        history = self.root / 'data/omarchy-replay/history'; history.mkdir(parents=True)
+        (history / 'index.sqlite').touch()
+        with patch.object(open_replay, 'launch_viewer', return_value=0) as launch, \
+             patch.object(open_replay.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                 [], 0, json.dumps({'history': str(history)}).encode())) as run:
+            self.assertEqual(open_replay.main(['--toggle']), 0)
+            self.assertEqual(launch.call_args.args[1:], (history, {}))
+            self.assertEqual(launch.call_args.kwargs, {'toggle': True})
+            self.assertEqual(run.call_args.args[0][-2:], ['daemon', 'paths'])
+
+    def test_configured_external_history_is_selected_without_recording(self):
+        config = self.root / 'config/omarchy-replay/config.toml'
+        config.parent.mkdir(parents=True); config.touch()
+        history = self.root / 'other-disk/history'; history.mkdir(parents=True)
+        (history / 'index.sqlite').touch()
+        with patch.object(open_replay, 'launch_viewer', return_value=0) as launch, \
+             patch.object(open_replay.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                 [], 0, json.dumps({'history': str(history)}).encode())) as run:
+            self.assertEqual(open_replay.main([]), 0)
+            self.assertEqual(launch.call_args.args[1:], (history, {}))
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[0][-2:], ['daemon', 'paths'])
+
+    def test_legacy_config_requires_migration_but_explicit_trial_still_opens(self):
+        config = self.root / 'config/oma-rewind/config.toml'
+        config.parent.mkdir(parents=True); config.touch()
+        with patch.object(open_replay, 'launch_viewer', return_value=0) as launch, \
+             patch.object(sys, 'stderr', io.StringIO()) as stderr:
+            self.assertEqual(open_replay.main([]), 1)
+            launch.assert_not_called()
+            self.assertIn('./scripts/replay install', stderr.getvalue())
+            self.assertEqual(open_replay.main(['--runs-dir=' + str(self.runs)]), 0)
+            self.assertEqual(launch.call_args.args[1], self.dataset)
+
+    def test_invalid_config_opens_last_accepted_history_with_notice(self):
+        config = self.root / 'config/omarchy-replay/config.toml'
+        config.parent.mkdir(parents=True); config.write_text('[malformed')
+        history = self.root / 'other-disk/history'; history.mkdir(parents=True)
+        (history / 'index.sqlite').touch()
+        with patch.object(open_replay, 'launch_viewer', return_value=0) as launch, \
+             patch.object(open_replay.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                 [], 0, json.dumps({'history': str(history), 'config_error': 'Invalid settings'}).encode())), \
+             patch.object(sys, 'stderr', io.StringIO()) as stderr:
+            self.assertEqual(open_replay.main([]), 0)
+            self.assertEqual(launch.call_args.args[1], history)
+            self.assertIn('last accepted history', stderr.getvalue())
+
+    def test_toggle_closes_only_matching_focused_viewer(self):
+        client = {'pid': 123, 'mapped': True, 'address': '0xabc'}
+        with patch.object(viewer_launch, 'process_view', return_value=(self.dataset, False)), \
+             patch.object(viewer_launch.subprocess, 'run', side_effect=[
+                 subprocess.CompletedProcess([], 0, json.dumps([client]).encode()),
+                 subprocess.CompletedProcess([], 0, json.dumps(client).encode()),
+                 subprocess.CompletedProcess([], 0, b'ok')]) as run:
+            self.assertTrue(viewer_launch.focus_existing(self.dataset, self.binary, toggle=True))
+            self.assertEqual(run.call_args.args[0], ['hyprctl', 'dispatch', 'hl.dsp.window.close({ window = "address:0xabc" })'])
 
     def test_fixed_trial_resumes_saved_policy_without_boost(self):
         for cpu in (0, 7, 100):
@@ -227,7 +288,7 @@ class LauncherTest(unittest.TestCase):
                                 capture_output=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f'Exec="{ROOT / "scripts/replay"}" open --notify-errors\n', result.stdout)
-        self.assertIn('Name=Replay\n', result.stdout)
+        self.assertIn('Name=Omarchy Replay\n', result.stdout)
         self.assertNotIn('record', result.stdout)
 
 

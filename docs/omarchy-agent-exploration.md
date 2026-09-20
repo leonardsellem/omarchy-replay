@@ -1,6 +1,6 @@
 # Native Omarchy agent and recall: living exploration
 
-Started: 2026-09-12. Last updated: 2026-09-19.
+Started: 2026-09-12. Last updated: 2026-09-20.
 
 All project documentation lives under `docs/`; see the [document index](README.md). Run commands from the repository root. This document preserves the evolving design record; the [roadmap](roadmap.md) describes current implementation status.
 
@@ -24,13 +24,13 @@ The current scope is **native Omarchy on the desktop only**, confirmed on 2026-0
 
 | Area | Direction and status |
 | --- | --- |
-| What is remembered | User accepted the proposed visible-screen scope: selected monitors, exclusions, and easy pause. Audio remains a separate possible extension. Specific exclusion settings remain to be designed. |
+| What is remembered | User accepted the proposed visible-screen scope: selected monitors, exclusions, and easy pause. Audio remains a separate possible extension. Exact app/title rules and local window pickers are now implemented; broader identity coverage remains validation work. |
 | How far back | User-configurable retention. The user also wants indexing and potentially synthesis to make growing history useful. Separate lifetimes for original evidence and summaries are still a design question. |
 | Local data and models | Local by default; model requests use the coding agents already configured on the computer. On 2026-09-18 the user added optional S3-compatible storage under their control, with service-managed uploads and local cleanup. This explicitly extends the earlier all-local storage direction. |
 | Initiative | User delegated the simplest recommendation. Working default: remember quietly, answer when summoned, and retrieve relevant history during user-requested assistance. No unsolicited context notifications initially. |
 | Agent integration | Search OCR text, retrieve relevant original images and adjacent moments, and supply cited evidence to the user's configured coding agent. Subsequent tasks belong to that agent; Replay does not own drafting or execution workflows. |
 | Devices | Native Omarchy desktop only for now. Cross-device access is a later interest. |
-| Interaction | On 2026-09-18 the user endorsed the proposed UX direction and reinforced Omarchy's keyboard-driven principles. Detailed bindings and layout remain proposals. |
+| Interaction | On 2026-09-18 the user endorsed the proposed UX direction and reinforced Omarchy's keyboard-driven principles. The implemented timeline and I controls use native keyboard navigation; Super+Alt+R summons/dismisses the installed viewer. |
 | Background performance | On 2026-09-18 the user made extremely low RAM, CPU, and disk use a primary requirement. Foreground work must remain responsive. Measure capture-related compositor/GPU work as well as the service, and make coverage/resource tradeoffs explicit. |
 | Capture rate | User-adjustable, confirmed on 2026-09-18. Explain how the interval affects fleeting-content coverage and resource use. Proposed overload behavior may temporarily slow or pause capture, with visible status; supported rates and the default remain to be measured. |
 | Monitor selection | On 2026-09-19 the user proposed choosing a single monitor. Recommendation: begin with one explicitly selected display; allow additional displays by opt-in later. Current prototype captures one selected output. Multi-monitor simultaneous cost is unmeasured. |
@@ -492,3 +492,28 @@ The user corrected the initial research synthesis because it added drafting and 
 The new anchor is: **“I had a meeting with XYZ and they sent me something—what was it?”** The agent searches the person's name and other clues in Replay's OCR index, retrieves candidate moments and their original images, inspects nearby context when needed, and uses that evidence to answer. The meeting is a remembered clue; audio or structured meeting/app identity is not required. A correct result finds what appeared on screen and makes the supporting moments inspectable.
 
 The [agent roadmap](roadmap.md#practical-agent-workflows-to-revisit-at-that-milestone) explicitly reserves search behavior, source/image access, context limits and incomplete-coverage handling to **hash out when we reach that milestone**. Automatic person/project association is not a prerequisite. Shared history, configuration, storage and recording lifecycle retain their place ahead of this work. This pass updates research and documentation only.
+
+## Shared recorder milestone (2026-09-20)
+
+The user authorized cleanup of the previous trial processes and implementation of shared history, the background recorder/configuration, retention, native controls/lifecycle, and exclusions/deletion. The old per-trial coordinators were stopped while recordings were preserved. These five areas are now implemented locally; the [service guide](background-recording.md) and [verification record](background-recording-implementation.md) supersede earlier future-tense implementation notes above.
+
+The default remains one selected output every five seconds. New shared history uses lossless originals, one OCR worker, 30-day retention, a separate 10-GiB allowance and 1-GiB free-space floor. These are adjustable defaults, not established all-day storage guarantees. A full allowance pauses capture; OCR backlog alone does not reject a moment. Saved manual pause/stop survives temporary lock, sleep and display conditions.
+
+I is the home for recording, independent indexing, Settings and reviewed recent deletion. Native configuration lives under `~/.config/oma-rewind`; data/state/cache use corresponding XDG locations. Login startup is opt-in. Exclusions combine compositor masking with conservative whole-output pauses for matching visible windows. Replay masking is mandatory. Selected-window masks may cover other windows with the same app/title, and all masks also affect other compositor screen-sharing clients; this scope is explained in Settings.
+
+The next validation step is ordinary work with the installed service, measuring completeness, lag, resources and actual desktop lifecycle together. The next feature milestone is the bounded search/fetch/context interface for the user's coding agent, within the already agreed retrieval-only product boundary. S3 and synthesis remain later work.
+
+
+## Settings and desktop refinement — 2026-09-20
+
+The product name is Omarchy Replay. Current configuration, data, state, cache and service names use `omarchy-replay`; earlier `oma-rewind` references above describe the previous naming. The installer preserves existing files while migrating those directories and leaves compatibility links.
+
+The main history window opens centered, floating and nearly full screen. Controls use text. Settings discovers displays, shows the history folder, opens it in the file manager and supports a folder on another mounted local disk. Changing the folder leaves the old archive in place. Missing storage pauses work rather than creating a replacement archive on the main disk. Setup, Exclusions and Resources offer copyable prompts so the user can ask their configured coding agent to understand and edit Replay settings. Resource advice must use observed throughput and foreground impact; hardware specifications alone do not justify higher CPU allowances.
+
+Timeline navigation keeps the previous image visible until the selected image is decoded, with stale highlights and copy disabled during that interval. The active marker uses a brief animation. The [README](../README.md), [architecture](architecture.md) and [agent guide](agent-guide.md) describe the current behavior and separate it from future structured recall integration.
+
+The user clarified that Replay is an installed Omarchy plugin: end users will not have a source checkout. Copied prompts now contain the resolved executable/config/history/log paths, a TOML reference with supported options and bounds, and diagnostic/apply instructions. The remote repository supplies optional full-source context. User-facing guides follow this model; source-build instructions remain for development only.
+
+## Screensaver exclusion — 2026-09-20
+
+The user requested that Omarchy's screensaver be excluded. Its exact app ID, `org.omarchy.screensaver`, is now mandatory alongside Replay's own exclusion, including when the configured app list is customized or empty. A visible screensaver on the recorded display pauses capture and receives a compositor mask. Closing it permits capture only when saved intent is running and other environment checks pass. Manual Pause/Stop remains in effect, and OCR can continue while the computer is awake. This policy does not establish real hardware screensaver or sleep/wake validation.
