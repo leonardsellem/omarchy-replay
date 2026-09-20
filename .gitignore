@@ -1,0 +1,45 @@
+/build/
+/build-*/
+/runs/
+/recordings/
+/datasets/
+/history/
+/screenshots/
+__pycache__/
+*.pyc
+
+# Local settings, credentials and private repository backups.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.envrc
+credentials.json
+secrets.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.bundle
+
+# Runtime history and generated diagnostics, even outside runs/.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Captured media and downloaded experiment models are never source files.
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.onnx
+*.traineddata
