@@ -117,7 +117,7 @@ struct IndexResult {
     bool processed = false;
     bool canceled = false;
     qint64 frameId = 0;
-    QString state = "idle";
+    QString state = "idle"; // "busy" means retry this call, not an empty queue.
     QString error;
     double ocrMs = 0;
 };
@@ -136,6 +136,7 @@ public:
     IndexResult processNext();
     QJsonObject statsJSON() const;
 private:
+    IndexResult processNextOnce();
     struct Impl;
     std::unique_ptr<Impl> d;
 };

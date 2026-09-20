@@ -13,6 +13,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStorageInfo>
+#include <QThread>
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <fcntl.h>
@@ -109,6 +110,13 @@ struct RecognizedText {
 double cpuMs() { return 1000.0 * double(std::clock()) / CLOCKS_PER_SEC; }
 QString dbPath(const QString &directory) { return QDir(directory).filePath("index.sqlite"); }
 
+class SqliteError : public std::runtime_error {
+public:
+    const int code;
+    SqliteError(const QString &message, int extendedCode) : std::runtime_error(message.toStdString()), code(extendedCode) {}
+    bool contention() const { return (code & 0xff) == SQLITE_BUSY || (code & 0xff) == SQLITE_LOCKED; }
+};
+
 struct Database {
     sqlite3 *handle = nullptr;
     Database(const QString &path, bool create, bool writable = false) {
@@ -119,6 +127,7 @@ struct Database {
             handle = nullptr;
             error("Cannot open recall index: " + message);
         }
+        sqlite3_extended_result_codes(handle, 1);
         sqlite3_busy_timeout(handle, 1000);
     }
     ~Database() { if (handle) sqlite3_close(handle); }
@@ -126,8 +135,9 @@ struct Database {
         char *message = nullptr;
         if (sqlite3_exec(handle, sql, nullptr, nullptr, &message) != SQLITE_OK) {
             const QString detail = QString::fromUtf8(message ? message : sqlite3_errmsg(handle));
+            const int code = sqlite3_extended_errcode(handle);
             sqlite3_free(message);
-            error("Recall index: " + detail);
+            throw SqliteError("Recall index: " + detail, code);
         }
     }
 };
@@ -136,7 +146,7 @@ struct Statement {
     sqlite3_stmt *handle = nullptr;
     explicit Statement(Database &db, const char *sql) {
         if (sqlite3_prepare_v2(db.handle, sql, -1, &handle, nullptr) != SQLITE_OK)
-            error("Recall query: " + QString::fromUtf8(sqlite3_errmsg(db.handle)));
+            throw SqliteError("Recall query: " + QString::fromUtf8(sqlite3_errmsg(db.handle)), sqlite3_extended_errcode(db.handle));
     }
     ~Statement() { sqlite3_finalize(handle); }
     void bind(int column, qint64 value) { sqlite3_bind_int64(handle, column, value); }
@@ -147,7 +157,10 @@ struct Statement {
     bool next() {
         const int result = sqlite3_step(handle);
         if (result == SQLITE_ROW) return true;
-        if (result != SQLITE_DONE) error("Recall index write/read failed: " + QString::fromUtf8(sqlite3_errmsg(sqlite3_db_handle(handle))));
+        if (result != SQLITE_DONE) {
+            const auto db = sqlite3_db_handle(handle);
+            throw SqliteError("Recall index write/read failed: " + QString::fromUtf8(sqlite3_errmsg(db)), sqlite3_extended_errcode(db));
+        }
         return false;
     }
     qint64 number(int column) const { return sqlite3_column_int64(handle, column); }
@@ -1374,6 +1387,7 @@ struct Indexer::Impl : OcrEngine {
     std::unique_ptr<Database> db;
     QFile lock;
     bool legacy = false;
+    bool initialized = false;
     bool reuseEnabled = false;
     QString reuseProfile;
     qint64 reuseLookups = 0, reuseHits = 0, reuseMisses = 0, reuseStores = 0, reuseInvalidations = 0;
@@ -1387,29 +1401,65 @@ struct Indexer::Impl : OcrEngine {
     std::function<double(bool)> cpuPercentProvider;
     double ocrWallMs = 0, ocrCpuMs = 0, decodeWallMs = 0, hashWallMs = 0;
     double startCpuMs = cpuMs();
+    qint64 databaseContentions = 0;
+    int lastContentionCode = 0;
+    double databaseRetryWaitMs = 0;
+    std::exception_ptr databasePollError;
 
     explicit Impl(const IndexerOptions &opts) : OcrEngine(workerOptions(opts)), lock(QDir(options.directory).filePath(".indexer.lock")),
                                                reuseEnabled(opts.ocrReuse) {
         db = std::make_unique<Database>(dbPath(options.directory), false, true);
+        // A short SQLite wait handles brief handoffs. Longer contention yields
+        // to the worker loop so stop signals stay responsive and OCR is deferred.
+        sqlite3_busy_timeout(db->handle, 100);
         if (QFileInfo(lock.fileName()).isSymLink() || !lock.open(QIODevice::ReadWrite) ||
             fcntl(lock.handle(), F_SETFD, FD_CLOEXEC) != 0 || flock(lock.handle(), LOCK_EX | LOCK_NB) != 0)
             error("Another index worker owns this dataset, or its worker lock is unavailable");
         lock.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-        db->exec("PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576");
-        legacy = !hasIndexStates(*db);
-        if (!legacy) { ensureSchedule(*db); ensureRecallGeometry(*db); cleanReadySources(*db, options.directory); }
-        if (!legacy && reuseEnabled) ensureOcrReuse(*db);
         cpuPercentProvider = opts.cpuPercentProvider;
         if (cpuPercentProvider) options.ocrCpuPercentProvider = [this] {
             const qint64 now = QDateTime::currentMSecsSinceEpoch();
             const qint64 pollTime = lifetime.elapsed();
             if (pollTime >= nextBoostPollMs) {
-                Statement request(*db, "SELECT catch_up_until_ms FROM index_schedule WHERE id=1");
-                catchUpUntilMs = request.next() ? request.number(0) : 0;
+                try {
+                    Statement request(*db, "SELECT catch_up_until_ms FROM index_schedule WHERE id=1");
+                    catchUpUntilMs = request.next() ? request.number(0) : 0;
+                } catch (const SqliteError &) {
+                    // Tesseract's noexcept monitor catches callback errors.
+                    // Preserve the SQLite code for the outer worker boundary.
+                    databasePollError = std::current_exception();
+                    throw;
+                }
                 nextBoostPollMs = pollTime + 1000;
             }
             return cpuPercentProvider(currentPriority || catchUpUntilMs > now);
         };
+    }
+
+    void initializeDatabase() {
+        if (initialized) return;
+        // These idempotent migrations can race an active recorder at startup.
+        // Run them inside the same contention boundary as subsequent jobs.
+        db->exec("PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576");
+        legacy = !hasIndexStates(*db);
+        if (!legacy) { ensureSchedule(*db); ensureRecallGeometry(*db); cleanReadySources(*db, options.directory); }
+        if (!legacy && reuseEnabled) ensureOcrReuse(*db);
+        initialized = true;
+    }
+
+    bool stopRequested() const { return options.stopRequested && options.stopRequested(); }
+
+    bool deferContention(const SqliteError &exception) {
+        if (!exception.contention()) throw exception;
+        // Never retain an old snapshot or partial transaction while waiting.
+        if (!sqlite3_get_autocommit(db->handle)) db->exec("ROLLBACK");
+        resetGeometry();
+        ++databaseContentions;
+        lastContentionCode = exception.code;
+        QElapsedTimer waiting; waiting.start();
+        while (waiting.elapsed() < 100 && !stopRequested()) QThread::msleep(20);
+        databaseRetryWaitMs += waiting.nsecsElapsed() / 1e6;
+        return stopRequested();
     }
 
     void resetGeometry() {
@@ -1603,18 +1653,38 @@ Indexer::Indexer(const IndexerOptions &options) : d(std::make_unique<Impl>(optio
 Indexer::~Indexer() = default;
 
 int Indexer::retryFailed() {
-    if (d->legacy) return 0;
-    d->db->exec("UPDATE frames SET ocr_state='pending',ocr_error='' "
-                "WHERE ocr_state='failed' AND source_path<>''");
-    d->resetGeometry();
-    return sqlite3_changes(d->db->handle);
+    while (!d->stopRequested()) {
+        try {
+            d->initializeDatabase();
+            if (d->legacy) return 0;
+            d->db->exec("UPDATE frames SET ocr_state='pending',ocr_error='' "
+                        "WHERE ocr_state='failed' AND source_path<>''");
+            d->resetGeometry();
+            return sqlite3_changes(d->db->handle);
+        } catch (const SqliteError &exception) {
+            if (d->deferContention(exception)) return 0;
+        }
+    }
+    return 0;
 }
 
 IndexResult Indexer::processNext() {
+    d->databasePollError = nullptr;
+    try { return processNextOnce(); }
+    catch (const SqliteError &exception) {
+        IndexResult result;
+        result.canceled = d->deferContention(exception);
+        result.state = result.canceled ? "pending" : "busy";
+        return result;
+    }
+}
+
+IndexResult Indexer::processNextOnce() {
     IndexResult result;
+    if (d->stopRequested()) { result.canceled = true; result.state = "pending"; return result; }
+    d->initializeDatabase();
     if (d->legacy) return result;
     cleanReadySources(*d->db, d->options.directory);
-    if (d->options.stopRequested && d->options.stopRequested()) { result.canceled = true; result.state = "pending"; return result; }
     QString source;
     int width = 0, height = 0;
     qint64 timestamp = 0;
@@ -1692,7 +1762,14 @@ IndexResult Indexer::processNext() {
     } catch (const OcrCancelled &) {
         ++d->canceledJobs; d->resetGeometry(); result.canceled = true; result.state = "pending";
         return result;
+    } catch (const SqliteError &) {
+        if (!sqlite3_get_autocommit(d->db->handle)) d->db->exec("ROLLBACK");
+        d->resetGeometry();
+        // Scheduler/reuse reads can fail during recognition too. Database
+        // failures are not evidence of a bad image or a failed OCR result.
+        throw;
     } catch (const std::exception &exception) {
+        if (d->databasePollError) std::rethrow_exception(d->databasePollError);
         if (publishing || published) {
             if (publishing) sqlite3_exec(d->db->handle, "ROLLBACK", nullptr, nullptr, nullptr);
             d->resetGeometry();
@@ -1739,6 +1816,8 @@ IndexResult Indexer::processNext() {
 
 QJsonObject Indexer::statsJSON() const {
     QJsonObject stats{{"directory", d->options.directory}, {"processed", d->processed}, {"failed_jobs", d->failedJobs},
+        {"database_contentions", d->databaseContentions}, {"database_last_contention_code", d->lastContentionCode},
+        {"database_retry_wait_ms", d->databaseRetryWaitMs},
         {"priority_jobs", d->priorityJobs}, {"oldest_jobs", d->oldestJobs}, {"obsolete_jobs", d->obsoleteJobs},
         {"ocr_discontinuity_resets", d->discontinuityResets},
         {"ocr_reuse_enabled", d->reuseEnabled}, {"ocr_reuse_profile_valid", !d->reuseProfile.isEmpty()},

@@ -200,9 +200,8 @@ void busyPublicationStaysPending(const QString &root) {
     opts.stopRequested = [&] {
         if (++checkpoints == 2) {
             require(sqlite3_exec(writer, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) == SQLITE_OK, "hold competing write lease");
-            // Release after the worker's 1s BEGIN timeout but before a wrongly
-            // attempted second UPDATE timeout. This exposes the old error path
-            // that could mark a valid job failed merely because capture wrote.
+            // Outlast both the old one-second fatal timeout and the new short
+            // deferral. A competing capture must not fail valid OCR evidence.
             release = std::thread([&] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1300));
                 sqlite3_exec(writer, "COMMIT", nullptr, nullptr, nullptr);
@@ -212,10 +211,12 @@ void busyPublicationStaysPending(const QString &root) {
     };
     replay::Indexer indexer(opts);
     bool failed = false;
-    try { indexer.processNext(); } catch (const std::exception &) { failed = true; }
+    replay::IndexResult result;
+    try { result = indexer.processNext(); } catch (const std::exception &) { failed = true; }
     if (release.joinable()) release.join();
     sqlite3_close(writer);
-    require(failed && sql(directory, "SELECT ocr_state FROM frames WHERE id=1") == "pending" &&
+    require(!failed && !result.processed && result.state == "busy" &&
+            sql(directory, "SELECT ocr_state FROM frames WHERE id=1") == "pending" &&
             count(indexer, "failed_jobs") == 0, "reuse BEGIN contention converted pending evidence into an OCR failure");
     ready(indexer);
 }

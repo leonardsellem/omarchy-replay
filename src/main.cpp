@@ -423,6 +423,7 @@ int main(int argc, char **argv) {
                 if (!scheduler) publishPolicy(false);
                 if (item.canceled) { canceled = true; break; }
                 if (item.state == "failed") ++failed;
+                if (item.state == "busy") continue; // Already backed off; one-shot workers must retry too.
                 if (!item.processed) {
                     if (!p.isSet("follow")) break;
                     publishPolicy(false);

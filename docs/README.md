@@ -19,6 +19,7 @@ Project documents live in this `docs/` directory. Start with the [repository REA
 - [Evening trial review](personal-trial-review-6.md): all 459 moments retained and indexed, approximately 44 minutes of natural catch-up, and an 8.43 MiB idle coordinator afterward.
 - [Trial after scheduling changes](personal-trial-review-7.md): all 93 observations retained and indexed, at most three pending images observed, approximately 32% of one core, and the remaining native CPU-ceiling limitation.
 - [Native integration follow-up](native-integration-iteration.md): persistent viewer exclusion, synthetic pixel proof, and explicitly managed OCR jobs with independently verified resource limits and lifecycle checks.
+- [Indexing database contention](index-contention-fix.md): a retained-history trial exposed a fatal lock error; diagnosis, recovery behavior and regression checks.
 - [Pipeline efficiency research](pipeline-efficiency-research.md): proposed priority-based scheduling, verified OCR reuse, lossless temporal compression, and native damage tracking, with sources and a controlled comparison plan.
 - [Scheduling and reuse iteration](scheduling-efficiency-iteration.md): utilization-aware backoff, optional worker ceiling, broader allowance comparison, and exact-reuse correctness and opportunity findings.
 - [CPU policy comparison](cpu-policy-comparison.md): six same-image passes separate OCR work from pacing delay, verify identical results, and expose quota-induced pressure readings.

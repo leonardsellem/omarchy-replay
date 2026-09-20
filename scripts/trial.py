@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A finite, explicitly started local trial. Diagnostics contain no captured text."""
+"""A finite local trial. Numeric reports omit captured text; process logs are private."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -48,6 +48,7 @@ WORKER_FIELDS = RECORDER_FIELDS | set("""processed failed_jobs canceled_jobs can
     elapsed_ms decode_wall_ms hash_wall_ms ocr_init_ms ocr_budget_sleep_count ocr_budget_checkpoints
     ocr_max_callback_wall_gap_ms ocr_max_callback_cpu_gap_ms exit_code forced_stop normal_exit
     priority_jobs oldest_jobs obsolete_jobs ocr_discontinuity_resets
+    database_contentions database_last_contention_code database_retry_wait_ms
     ocr_reuse_enabled ocr_reuse_profile_valid ocr_reuse_limit ocr_reuse_lookups ocr_reuse_hits
     ocr_reuse_misses ocr_reuse_stores ocr_reuse_invalidations ocr_reuse_original_pixels
     ocr_reuse_identity_ms ocr_reuse_lookup_ms""".split())
@@ -436,6 +437,12 @@ def supervise(command, environment, trial, dataset, metadata, expected_seconds):
         worker = run.get('index_worker', {}) if isinstance(run, dict) else {}
         if not isinstance(worker, dict):
             worker = {}
+        worker_error = worker.get('stderr_tail')
+        if isinstance(worker_error, str) and worker_error:
+            # Worker stderr is embedded in the recorder receipt, not forwarded
+            # to its stderr pipe. Keep it local and out of numeric diagnostics.
+            (trial / 'index-worker.stderr.tail.log').write_bytes(
+                worker_error.encode('utf-8', errors='replace')[-TAIL_BYTES:])
         worker_stats = numeric(worker.get('result'), WORKER_FIELDS)
         worker_result = worker.get('result') if isinstance(worker.get('result'), dict) else {}
         scheduler = worker_result.get('scheduler') if isinstance(worker_result.get('scheduler'), dict) else {}
@@ -589,7 +596,19 @@ def supervise(command, environment, trial, dataset, metadata, expected_seconds):
                     announce(f'Background indexing handoff failed: {error}. '
                              'Retained history is safe; open it to inspect or retry indexing.', file=sys.stderr)
     if status == 'failed':
-        announce(f'Local process log: {trial / "stderr.tail.log"}', file=sys.stderr)
+        worker_log = trial / 'index-worker.stderr.tail.log'
+        if tails['stderr']:
+            announce(f'Local process log: {trial / "stderr.tail.log"}', file=sys.stderr)
+        if worker_log.is_file():
+            announce(f'Local indexing worker log: {worker_log}', file=sys.stderr)
+        if not tails['stderr'] and not worker_log.is_file():
+            receipt = dataset / 'run.json'
+            if receipt.is_file():
+                announce(f'Local recorder result: {receipt}', file=sys.stderr)
+            elif tails['stdout']:
+                announce(f'Local process output: {trial / "stdout.tail.log"}', file=sys.stderr)
+            else:
+                announce('No process error details were recorded.', file=sys.stderr)
     return 130 if interrupted else 124 if timed_out else 0 if status == 'complete' else 1
 
 

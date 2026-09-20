@@ -318,6 +318,45 @@ def failures(root):
         assert (runs / 'latest.json').read_bytes() == pointer, 'invalid arguments started/replaced a trial'
 
 
+def nested_worker_failure(root):
+    """Child stderr stays discoverable without leaking raw text into reports."""
+    runs = root / 'worker-failed-runs'
+    failing = root / 'worker-failing-binary.py'
+    sensitive = 'SYNTHETIC_PRIVATE_OCR_TEXT'
+    worker_error = 'discarded prefix\n' + ('x' * (70 * 1024)) + f'\n{sensitive}\nreplay: Recall index: database is locked\n'
+    contention = {'database_contentions': 2, 'database_last_contention_code': 5,
+                  'database_retry_wait_ms': 80.5}
+    receipt = {'failed': True, 'index_worker': {'exit_code': 1, 'normal_exit': True,
+                                              'stderr_tail': worker_error,
+                                              'result': {'processed': 7, 'text': sensitive, **contention}}}
+    failing.write_text('#!/usr/bin/env python3\nimport json, pathlib, sys\n'
+                       'dataset = pathlib.Path(sys.argv[sys.argv.index("--dir") + 1])\n'
+                       'dataset.mkdir(mode=0o700)\n'
+                       f'(dataset / "run.json").write_text(json.dumps({receipt!r}))\n'
+                       'sys.exit(23)\n')
+    failing.chmod(0o700)
+    result = invoke('--demo', '--seconds', '1', '--codec', 'webp', '--binary', failing, '--runs-dir', runs)
+    assert result.returncode != 0, 'nested worker failure reported success'
+    trial, _ = latest(runs)
+    log = trial / 'index-worker.stderr.tail.log'
+    assert not (trial / 'stderr.tail.log').read_bytes(), 'fixture must leave recorder stderr empty'
+    assert log.read_bytes() == worker_error.encode()[-64 * 1024:], 'worker error was lost or unbounded'
+    assert stat.S_IMODE(log.stat().st_mode) & 0o077 == 0, 'worker log is not private'
+    assert f'Local indexing worker log: {log}' in result.stderr, result.stderr
+    assert 'Local process log:' not in result.stderr, 'failure points at an empty recorder log'
+    assert sensitive not in result.stdout + result.stderr, 'raw worker stderr leaked into terminal'
+    summary = read_summary(trial)
+    assert summary['status'] == 'failed' and summary['index_worker']['exit_code'] == 1, summary
+    assert summary['index_worker']['processed'] == 7, summary
+    assert all(summary['index_worker'].get(key) == value for key, value in contention.items()), summary
+    assert sensitive not in (trial / 'summary.json').read_text(), 'raw worker text leaked into summary'
+    report = invoke('report', '--trial', trial, '--binary', failing)
+    require_success(report)
+    assert sensitive not in report.stdout + report.stderr and 'stderr_tail' not in report.stdout, report.stdout
+    reported = json.loads(report.stdout)
+    assert all(reported['index_worker'].get(key) == value for key, value in contention.items()), reported
+
+
 def noninteractive_requires_output(root):
     isolated = root / 'noninteractive'
     isolated.mkdir()
@@ -565,6 +604,7 @@ def main():
         archive_first_dispatch(root)
         interrupt_pending(root)
         failures(root)
+        nested_worker_failure(root)
         noninteractive_requires_output(root)
         mocked_monitor_selection(root)
         skipped_capture_reporting(root)
