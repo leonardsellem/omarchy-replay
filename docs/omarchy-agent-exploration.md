@@ -530,3 +530,23 @@ The user clarified that storage must be a rolling window. The earlier implementa
 Settings should help users choose the size: show capacity from observed usage and update the estimate while the size is edited. Use active recording hours after a short sample. Estimate calendar days and space for the age window only after enough retained calendar history exists; do not invent an eight-hour workday. Diagnostics remain opt-in.
 
 The user also proposed compressing older images during downtime or reducing resolution. These remain options to benchmark, with screen-text readability, OCR coordinates, random-access latency, temporary disk use and total CPU cost as acceptance criteria. Similarity-based omission and longer capture intervals remain deferred. See [storage efficiency options](storage-efficiency-options.md).
+
+## Lossless WebP exploration — 2026-09-22
+
+The user requested an investigation of lossless WebP. Replay already uses its fastest exact lossless setting. The [synthetic effort experiment](webp-effort-experiment.md) found that keeping method 0 while raising effort to 50 reduced dense text by 52–53%, with no measured process-memory increase; the textured visual saved only 6% and took more CPU. Stronger settings reached 82–88% reduction on text and 34–36% on the visual, with higher CPU and memory costs. All 186 measured outputs preserved every RGBA byte.
+
+The recommendation is a bounded capture-pipeline trial of the fast candidate before changing defaults. Stronger idle recompression remains a separate proposal requiring resource limits and crash-safe replacement. No personal archive, production encoder, service or capture cadence changed during this exploration. Synthetic compression results do not establish ordinary-work storage gains, capture coverage or power use.
+
+## Fast lossless capture trial — 2026-09-22
+
+The user approved trying the fast candidate. The encoder now uses method 0, quality 50 for new images. In a paired production-pipeline test, both versions retained all 16 requested observations at five-second intervals and completed OCR without pending or failed images. Decoded pixels, recognized text, highlight geometry and search counts matched. Storage fell 4.18% in this less-dense fixture, with effectively unchanged CPU and memory. The earlier 52–53% result remains specific to the dense-text codec fixtures.
+
+The normal regression suite passed, with 31 tests successful and two opt-in native service tests skipped. The active local recorder was restarted onto the verified build with configuration and saved intent preserved. Existing originals remain unchanged; idle recompression is still a proposal. See the [capture-trial report](fast-webp-capture-trial.md) for evidence and limits. The next validation is ordinary desktop use, not an assumed archive-wide saving.
+
+## Controls and Settings readability — 2026-09-22
+
+The user asked to reduce dense explanatory text, especially Index status running across the full window. Recording and Search index now use bounded sections, with short primary status and expandable storage/processing details. Wide windows show two columns; small windows stack and scroll them. Settings groups related fields, keeps longer explanations under Details, and leaves Save/Cancel outside the scroll area. Retention consequences, exclusion scope and errors stay visible.
+
+This is a viewer refinement. Capture cadence, rolling storage, scheduling allowances, saved intent and agent-prompt behavior are unchanged. Native Qt tests and visual review use synthetic history at desktop and compact sizes; the [viewer design](replay-viewer-design.md#controls-and-settings-readability-2026-09-22) records the implementation and verification.
+
+The user then asked for clickable controls to look distinct from reading text. Buttons now use consistent outlines and subtle fills, with explicit interaction states and a stronger Settings Save action. Expanded disclosures name their hide action. Input outlines are clearer, while ordinary labels remain unboxed. This retains text-only controls and the current Omarchy palette.

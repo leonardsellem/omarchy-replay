@@ -69,13 +69,15 @@ Linux AT-SPI exposes text bounds and visibility state, but visibility flags do n
 
 ## 3. Storage: cheap durable capture, optional later compaction
 
-The current lossless WebP writer selects `quality=0`, `method=0`, and exact pixels. That favors encoding speed over size. Increasing lossless compression effort changes the CPU/size tradeoff, not image fidelity. A modest-effort setting is the cheapest storage experiment; it still cannot exploit repeated content between separate images. [Google WebP options](https://developers.google.com/speed/webp/docs/cwebp)
+At the time of this review, the lossless WebP writer selected `quality=0`, `method=0`, and exact pixels. That favors encoding speed over size. Increasing lossless compression effort changes the CPU/size tradeoff, not image fidelity. A modest-effort setting is the cheapest storage experiment; it still cannot exploit repeated content between separate images. [Google WebP options](https://developers.google.com/speed/webp/docs/cwebp)
+
+The later [WebP effort experiment](webp-effort-experiment.md) measured that tradeoff and led to a user-approved `method=0, quality=50` capture trial. The [architecture](architecture.md#capture-and-source-storage) describes the current encoder; the comparisons below retain this review's original baseline.
 
 For temporal compression, compare short independently recoverable chunks containing the same observations. Lossless RGB H.264 is a candidate before designing a custom format; its CPU, reference-frame memory and seek cost might outweigh the size benefit. FFmpeg exposes both lossless x264 mode and the packed-RGB encoder. Exact reconstruction must be checked, including explicit alpha handling. [FFmpeg encoder documentation](https://ffmpeg.org/ffmpeg-codecs.html#libx264_002c-libx264rgb)
 
 | Storage candidate | Possible benefit | Cost or unresolved issue |
 | --- | --- | --- |
-| Current fast lossless WebP | Cheap durable write, direct access, original pixels | Repeats static desktop content in separate files |
+| Original fast lossless WebP | Cheap durable write, direct access, original pixels | Repeats static desktop content in separate files |
 | Modest extra WebP effort | Smaller files with little format work | More CPU; no temporal sharing |
 | Short lossless RGB video chunks | Share information across adjacent screens | Encoder/decoder CPU, memory, seek and recovery complexity |
 | Existing hardware H.264/HEVC | Compact playback with host encoder support | Current NV12/QP22 path is lossy; cannot silently replace exact OCR originals |

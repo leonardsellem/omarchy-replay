@@ -94,6 +94,12 @@ ReplayColors theme(QWidget* widget) {
     colors.surface = mix(colors.foreground, colors.background, .045);
     colors.muted = mix(colors.foreground, colors.background, .72);
     colors.border = mix(colors.foreground, colors.background, .23);
+    const auto buttonFill = mix(colors.foreground, colors.background, .075);
+    const auto buttonBorder = mix(colors.foreground, colors.background, .48);
+    const auto buttonHover = mix(colors.foreground, colors.background, .14);
+    const auto buttonSelected = mix(colors.accent, colors.background, .18);
+    const auto disabledText = mix(colors.foreground, colors.background, .42);
+    const auto primaryHover = mix(colors.foreground, colors.accent, .15);
     QPalette palette = widget->palette();
     palette.setColor(QPalette::Window, colors.background);
     palette.setColor(QPalette::Base, colors.background);
@@ -115,19 +121,26 @@ ReplayColors theme(QWidget* widget) {
     widget->setFont(font);
     widget->setStyleSheet(QString(R"(
         QWidget { color: %1; }
-        QLineEdit, QComboBox { background: %2; border: 1px solid %3; padding: 8px 12px; selection-background-color: %4; selection-color: %5; }
+        QLineEdit, QComboBox { background: %2; border: 1px solid %8; padding: 8px 12px; selection-background-color: %4; selection-color: %5; }
         QLineEdit:focus, QComboBox:focus { border-color: %4; }
         QComboBox QAbstractItemView { background: %5; selection-background-color: %4; selection-color: %5; }
-        QAbstractSpinBox, QPlainTextEdit, QTableWidget { background: %5; border: 1px solid %3; padding: 4px; }
+        QAbstractSpinBox, QPlainTextEdit, QTableWidget { background: %5; border: 1px solid %8; padding: 4px; }
         QAbstractSpinBox:focus, QPlainTextEdit:focus, QTableWidget:focus { border-color: %4; }
         QTabWidget::pane { border: none; }
         QTabBar::tab { background: transparent; color: %6; padding: 9px 12px; border-bottom: 2px solid transparent; }
         QTabBar::tab:selected { color: %1; border-bottom-color: %4; }
         QHeaderView::section { background: %2; color: %6; border: none; padding: 5px; }
-        QPushButton { background: transparent; border: 1px solid transparent; padding: 5px 8px; }
-        QPushButton:hover, QPushButton:checked { background: %2; }
-        QPushButton:focus { border-color: %4; }
-        QPushButton:disabled { color: %3; }
+        QPushButton { background: %7; border: 1px solid %8; border-radius: 2px; padding: 6px 10px; }
+        QPushButton:hover { background: %9; border-color: %6; }
+        QPushButton:checked { background: %10; border-color: %4; }
+        QPushButton:pressed { background: %10; border-color: %4; padding: 7px 10px 5px 10px; }
+        QPushButton:focus { border: 2px solid %4; padding: 5px 9px; }
+        QPushButton:focus:pressed { padding: 6px 9px 4px 9px; }
+        QPushButton[primary="true"] { background: %4; color: %5; border-color: %4; }
+        QPushButton[primary="true"]:hover { background: %12; border-color: %12; }
+        QPushButton[primary="true"]:pressed { background: %4; border-color: %1; }
+        QPushButton[primary="true"]:focus { border-color: %1; }
+        QPushButton:disabled, QPushButton[primary="true"]:disabled { background: %2; color: %11; border: 1px solid %3; padding: 6px 10px; }
         QListWidget { background: transparent; border: none; outline: none; }
         QListWidget::item { padding: 3px 12px; border: none; border-bottom: 2px solid transparent; color: %6; }
         QListWidget::item:hover { background: %2; }
@@ -145,7 +158,9 @@ ReplayColors theme(QWidget* widget) {
         QLabel#keyboardHelp, QLabel#indexState, QLabel#recallStatus { color: %6; }
         QWidget#detailsPanel { background: %2; }
     )").arg(colors.foreground.name(), colors.surface.name(), colors.border.name(),
-            colors.accent.name(), colors.background.name(), colors.muted.name()));
+            colors.accent.name(), colors.background.name(), colors.muted.name(),
+            buttonFill.name(), buttonBorder.name(), buttonHover.name(), buttonSelected.name(),
+            disabledText.name(), primaryHover.name()));
     return colors;
 }
 
@@ -422,23 +437,96 @@ QString storageCapacityText(const QJsonObject& status, const QString& directory)
     return parts.join(' ');
 }
 
+QString storageCapacitySummary(const QJsonObject& status, const QString& directory) {
+    if (!status.value("running").toBool()) return "Storage estimate unavailable while the service is stopped.";
+    if (!currentStorageStatus(status, directory)) return "Storage estimate unavailable for this folder.";
+    const auto forecast = status.value("storage_forecast").toObject();
+    const auto usage = status.value("usage").toObject();
+    QStringList lines;
+    if (usage.contains("disk_bytes") && status.value("max_disk_mib").toDouble() > 0)
+        lines << QString("%1 / %2 GiB used")
+            .arg(usage.value("disk_bytes").toDouble() / (1024 * 1024 * 1024), 0, 'f', 1)
+            .arg(status.value("max_disk_mib").toDouble() / 1024, 0, 'f', 1);
+    const double hours = forecast.value("capacity_active_hours").toDouble(-1);
+    const double days = forecast.value("capacity_calendar_days").toDouble(-1);
+    if (days >= 0 && std::isfinite(days)) lines << QString("About %1 days of history at recent usage").arg(days, 0, 'f', 1);
+    else if (hours >= 0 && std::isfinite(hours)) lines << QString("About %1 active recording hours at recent usage").arg(hours, 0, 'f', 1);
+    else if (forecast.value("state").toString() == "no-growth") lines << "No recent storage growth to estimate capacity.";
+    else if (forecast.value("state").toString() == "insufficient-data") lines << "More recorded history needed to estimate capacity.";
+    else lines << "Capacity estimate unavailable.";
+    if (forecast.value("limiting_factor").toString() == "free-space") lines << "Limited by available disk space.";
+    return lines.join('\n');
+}
+
 class SettingsDialog final : public QDialog {
 public:
     explicit SettingsDialog(QWidget* parent, const QJsonObject& recordingStatus, std::function<QJsonArray()> displays) : QDialog(parent),
         recordingStatus_(recordingStatus),
         visibleWindows_(recordingStatus.value("visible_windows").toArray()),
         compositorInstance_(recordingStatus.value("compositor_instance").toString(qEnvironmentVariable("HYPRLAND_INSTANCE_SIGNATURE"))) {
-        theme(this);
+        const auto colors = theme(this);
         setObjectName("replaySettings");
         setWindowTitle("Omarchy Replay settings");
-        resize(710, 700);
+        resize(740, 740);
+        setMinimumSize(560, 420);
         auto* layout = new QVBoxLayout(this);
+        layout->setSpacing(12);
         auto* tabs = new QTabWidget;
         tabs->setObjectName("settingsTabs");
         layout->addWidget(tabs, 1);
-        auto* recording = new QWidget;
-        auto* form = new QFormLayout(recording);
-        form->setSpacing(12);
+        const auto makePage = [this, tabs](const QString& title, const QString& name) {
+            auto* scroll = new QScrollArea;
+            scroll->setObjectName(name);
+            scroll->setWidgetResizable(true);
+            scroll->setFrameShape(QFrame::NoFrame);
+            scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            scroll->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+            auto* page = new QWidget;
+            page->setFont(font());
+            page->setMaximumWidth(660);
+            auto* contents = new QVBoxLayout(page);
+            contents->setContentsMargins(18, 18, 18, 18);
+            contents->setSpacing(12);
+            contents->setAlignment(Qt::AlignTop);
+            scroll->setWidget(page);
+            page->setAutoFillBackground(false);
+            tabs->addTab(scroll, title);
+            return contents;
+        };
+        const auto section = [this](QVBoxLayout* page, const QString& title) {
+            if (page->count()) page->addSpacing(10);
+            auto* label = new QLabel(title);
+            auto font = this->font(); font.setBold(true); label->setFont(font);
+            page->addWidget(label);
+        };
+        const auto makeForm = [](QVBoxLayout* page) {
+            auto* form = new QFormLayout;
+            form->setHorizontalSpacing(20);
+            form->setVerticalSpacing(10);
+            form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+            page->addLayout(form);
+            return form;
+        };
+        const auto note = [colors](const QString& text) {
+            auto* label = new QLabel(text);
+            label->setWordWrap(true); label->setTextFormat(Qt::PlainText);
+            label->setStyleSheet(QString("color: %1;").arg(colors.muted.name()));
+            return label;
+        };
+        const auto details = [this, &note](QVBoxLayout* page, const QString& name, const QString& text) {
+            auto* toggle = new QPushButton("Details");
+            toggle->setObjectName(name); toggle->setCheckable(true); toggle->setAutoDefault(false);
+            auto* content = note(text); content->setObjectName(name + "Text"); content->hide();
+            page->addWidget(toggle, 0, Qt::AlignLeft); page->addWidget(content);
+            connect(toggle, &QPushButton::toggled, this, [toggle, content](bool open) {
+                content->setVisible(open); toggle->setText(open ? "Hide details" : "Details");
+            });
+            return content;
+        };
+        auto* recording = makePage("&Recording", "recordingSettingsScroll");
+        section(recording, "Capture");
+        auto* form = makeForm(recording);
         output_ = new QComboBox;
         output_->setObjectName("settingOutput");
         output_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -446,92 +534,91 @@ public:
         output_->addItem("Choose a display", QString());
         connect(output_, &QComboBox::activated, this, [this] { displayChosen_ = true; });
         form->addRow("&Display", output_);
-        displayNote_ = new QLabel("Looking for connected displays…"); displayNote_->setWordWrap(true);
-        form->addRow(displayNote_);
+        displayNote_ = note("Looking for connected displays…");
+        form->addRow(QString(), displayNote_);
         interval_ = new QDoubleSpinBox;
         interval_->setObjectName("settingInterval");
         interval_->setRange(.25, 60); interval_->setSingleStep(.25); interval_->setSuffix(" seconds");
         form->addRow("Capture &interval", interval_);
+        login_ = new QCheckBox("Start Replay at login");
+        login_->setObjectName("settingLoginStartup");
+        form->addRow(QString(), login_);
+        details(recording, "captureSettingsDetails",
+            "Opening Replay does not start recording. Use Controls to start it. Your pause and stop choices survive restarts.");
+        section(recording, "History limits");
+        auto* limits = makeForm(recording);
         days_ = new QSpinBox;
         days_->setObjectName("settingRetentionDays");
         days_->setRange(1, 3650); days_->setSuffix(" days");
-        form->addRow("&Keep history", days_);
-        auto* retention = new QLabel("Keep up to this age. When the disk allowance fills, the oldest images, text and queued work roll off first.");
-        retention->setWordWrap(true); form->addRow(retention);
+        limits->addRow("&Keep up to", days_);
         disk_ = new QSpinBox; disk_->setObjectName("settingMaxDiskMiB");
         disk_->setRange(64, 1048576); disk_->setSuffix(" MiB");
-        form->addRow("Disk &limit", disk_);
+        limits->addRow("Disk &allowance", disk_);
         free_ = new QSpinBox; free_->setObjectName("settingMinFreeMiB");
         free_->setRange(0, 1048576); free_->setSuffix(" MiB");
-        form->addRow("Leave &free", free_);
-        capacity_ = new QLabel;
-        capacity_->setObjectName("settingsStorageCapacity"); capacity_->setWordWrap(true); capacity_->setTextFormat(Qt::PlainText);
-        form->addRow(capacity_);
+        limits->addRow("Leave &free", free_);
+        recording->addWidget(note("Oldest history is deleted at the age or space limit, including its text and pending work. Recording continues."));
+        capacity_ = note({});
+        capacity_->setObjectName("settingsStorageCapacity");
+        recording->addWidget(capacity_);
+        capacityDetails_ = details(recording, "storageCapacityDetails", {});
+        capacityDetails_->setObjectName("settingsStorageDetails");
+        section(recording, "Storage location");
+        auto* storageForm = makeForm(recording);
         storage_ = new QLineEdit; storage_->setObjectName("settingStorageDirectory");
         storage_->setReadOnly(true); storage_->setAccessibleName("History storage folder");
         const QString viewedHistory = parent->property("historyDirectory").toString();
         storage_->setText(recordingStatus.value("history_directory").toString(viewedHistory.isEmpty() ? replayPaths().historyDirectory : viewedHistory));
-        form->addRow("History &folder", storage_);
+        storageForm->addRow("History &folder", storage_);
         auto* folders = new QHBoxLayout;
         auto* chooseFolder = new QPushButton("Choose folder…"); chooseFolder->setObjectName("chooseStorageDirectory");
         auto* openFolder = new QPushButton("Open folder"); openFolder->setObjectName("openStorageDirectory");
         auto* defaultFolder = new QPushButton("Use default"); defaultFolder->setObjectName("resetStorageDirectory");
         folders->addWidget(chooseFolder); folders->addWidget(openFolder); folders->addWidget(defaultFolder); folders->addStretch();
-        form->addRow(folders);
-        auto* storageNote = new QLabel("Choose an empty folder on this computer or a mounted disk, or reopen an existing Replay archive. Changing folders keeps your old history in its original folder.");
-        storageNote->setWordWrap(true); form->addRow(storageNote);
+        recording->addLayout(folders);
+        recording->addWidget(note("Changing folders leaves existing history where it is."));
+        details(recording, "storageSettingsDetails",
+            "Use an empty folder on this computer or a mounted disk, or choose an existing Replay archive to reopen it.");
         connect(chooseFolder, &QPushButton::clicked, this, [this] {
             const auto folder = QFileDialog::getExistingDirectory(this, "Choose history folder", storage_->text(),
                 QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
             if (!folder.isEmpty()) { storageDirectory_ = QDir(folder).absolutePath(); storage_->setText(storageDirectory_); }
         });
         connect(openFolder, &QPushButton::clicked, this, [this] {
-            if (!QFileInfo(storage_->text()).isDir()) { error_->setText("This folder is unavailable. Check the selected location or reconnect its disk."); return; }
-            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(storage_->text()))) error_->setText("Could not open the history folder in your file manager.");
+            if (!QFileInfo(storage_->text()).isDir()) { showError("This folder is unavailable. Check the selected location or reconnect its disk."); return; }
+            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(storage_->text()))) showError("Could not open the history folder in your file manager.");
         });
         connect(defaultFolder, &QPushButton::clicked, this, [this] { storageDirectory_.clear(); storage_->setText(replayPaths().historyDirectory); });
-        login_ = new QCheckBox("Start at login");
-        login_->setObjectName("settingLoginStartup");
-        form->addRow(login_);
-        auto* explanation = new QLabel("Opening Replay never starts recording. Start recording explicitly in Controls. Manual pause and stop choices survive restarts.");
-        explanation->setWordWrap(true); form->addRow(explanation);
-        tabs->addTab(recording, "&Recording");
-
-        auto* resources = new QWidget;
-        auto* resourceForm = new QFormLayout(resources);
-        resourceForm->setSpacing(12);
-        auto* resourceIntro = new QLabel("The defaults favor a responsive desktop. If text indexing falls behind, your coding agent can inspect Replay's timing and CPU data and suggest a measured adjustment.");
-        resourceIntro->setWordWrap(true); resourceForm->addRow(resourceIntro);
-        auto* resourcePrompt = new QPushButton("Copy resources prompt"); resourcePrompt->setObjectName("copyResourcesPrompt");
-        resourceForm->addRow(resourcePrompt);
-        connect(resourcePrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Resources); });
+        auto* resources = makePage("&Resources", "resourceSettingsScroll");
+        section(resources, "Text indexing");
+        resources->addWidget(note("CPU allowances are percentages of one core. Lower values leave more CPU for other apps, but text may take longer to become searchable."));
+        auto* resourceForm = makeForm(resources);
         const QVector<QPair<QString, QString>> budgets{{"While you work", "settingActiveCpu"}, {"When idle", "settingIdleCpu"},
-            {"For requested moments", "settingRequestCpu"}, {"When the computer is busy", "settingPressureCpu"}, {"Maximum worker CPU", "settingCpuCeiling"}};
+            {"Requested moments", "settingRequestCpu"}, {"Computer busy", "settingPressureCpu"}, {"Worker ceiling", "settingCpuCeiling"}};
         for (const auto& entry : budgets) {
             auto* spin = new QDoubleSpinBox;
             spin->setObjectName(entry.second); spin->setRange(entry.second == "settingCpuCeiling" ? 0 : 1, 100);
-            spin->setSuffix("% of one core"); spin->setDecimals(1);
+            spin->setSuffix(" %"); spin->setDecimals(1);
+            if (entry.second == "settingCpuCeiling") spin->setSpecialValueText("No ceiling");
             resourceForm->addRow(entry.first, spin); budgets_.append(spin);
         }
         idle_ = new QSpinBox; idle_->setObjectName("settingIdleSeconds");
         idle_->setRange(1, 3600); idle_->setSuffix(" seconds");
         resourceForm->addRow("Idle after", idle_);
-        auto* resourceNote = new QLabel("100% means one CPU core, regardless of how many your computer has. Lower values leave more CPU for other apps and can delay search. A zero maximum disables the worker's safety limit.");
-        resourceNote->setWordWrap(true); resourceForm->addRow(resourceNote);
-        tabs->addTab(resources, "&Resources");
+        details(resources, "resourceSettingsDetails",
+            "100% means one full CPU core, regardless of how many cores your computer has. Requested moments use the requested allowance when you ask Replay to process them. The busy allowance applies during sustained CPU pressure. A worker ceiling of 0 disables the safety limit.");
+        section(resources, "Help choosing limits");
+        resources->addWidget(note("Your coding agent can review local timing and CPU data, then recommend settings for this computer."));
+        auto* resourcePrompt = new QPushButton("Copy resources prompt"); resourcePrompt->setObjectName("copyResourcesPrompt");
+        resources->addWidget(resourcePrompt, 0, Qt::AlignLeft);
+        connect(resourcePrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Resources); });
 
-        auto* exclusions = new QWidget;
-        auto* exclusionLayout = new QVBoxLayout(exclusions);
-        auto* exclusionNote = new QLabel("Replay is always hidden from captured images. The Omarchy screensaver is always excluded and pauses capture while visible on the recorded display. Other matching windows also pause capture.");
-        exclusionNote->setWordWrap(true); exclusionLayout->addWidget(exclusionNote);
-        auto* exclusionPrompt = new QPushButton("Copy exclusions prompt"); exclusionPrompt->setObjectName("copyExclusionsPrompt");
-        exclusionLayout->addWidget(exclusionPrompt, 0, Qt::AlignLeft);
-        connect(exclusionPrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Exclusions); });
-        auto* exclusionHelp = new QLabel("Paste this prompt into your coding agent and describe what you want excluded. Or choose an app below and save.");
-        exclusionHelp->setWordWrap(true); exclusionLayout->addWidget(exclusionHelp);
-        auto* appLabel = new QLabel("Exact app identifiers, one per line");
+        auto* exclusionLayout = makePage("&Exclusions", "exclusionSettingsScroll");
+        exclusionLayout->addWidget(note("Matching windows pause capture while visible on the recorded display. Replay is always hidden; the screensaver always pauses capture."));
+        section(exclusionLayout, "Apps");
+        auto* appLabel = note("Exact app identifiers, one per line");
         apps_ = new QPlainTextEdit; apps_->setObjectName("settingExcludedApps");
-        apps_->setMaximumHeight(95); appLabel->setBuddy(apps_);
+        apps_->setMinimumHeight(76); apps_->setMaximumHeight(95); apps_->setTabChangesFocus(true); appLabel->setBuddy(apps_);
         exclusionLayout->addWidget(appLabel); exclusionLayout->addWidget(apps_);
         auto* chooseApp = new QPushButton("Choose visible app…");
         chooseApp->setObjectName("chooseExcludedApp"); chooseApp->setEnabled(!visibleWindows_.isEmpty());
@@ -550,6 +637,8 @@ public:
             const QString selected = chooseItem(this, "Exclude an app", "Pause capture whenever this app is visible", names, accepted);
             if (accepted && !apps_->toPlainText().split('\n').contains(selected)) apps_->appendPlainText(selected);
         });
+        section(exclusionLayout, "Window rules");
+        exclusionLayout->addWidget(note("All filled fields must match. Title patterns use regular expressions."));
         windows_ = new QTableWidget(0, 3);
         windows_->setObjectName("settingExcludedWindows");
         windows_->setHorizontalHeaderLabels({"Exact app", "Title pattern", "Window address"});
@@ -558,7 +647,8 @@ public:
         windows_->setCornerButtonEnabled(false);
         windows_->setSelectionBehavior(QAbstractItemView::SelectRows);
         windows_->setAccessibleName("Window exclusion rules. Nonempty fields must all match.");
-        exclusionLayout->addWidget(windows_, 1);
+        windows_->setMinimumHeight(132); windows_->setMaximumHeight(180);
+        exclusionLayout->addWidget(windows_);
         auto* ruleActions = new QHBoxLayout;
         auto* add = new QPushButton("&Add rule"); auto* remove = new QPushButton("&Remove rule");
         auto* chooseWindow = new QPushButton("Choose visible window…");
@@ -596,20 +686,28 @@ public:
             address->setData(Qt::UserRole, compositorInstance_); address->setData(Qt::UserRole + 1, addressText);
             windows_->setItem(row, 2, address); windows_->setCurrentCell(row, 0);
         });
-        auto* ruleNote = new QLabel("Title patterns use regular expressions. Nonempty fields must all match. Address rules last for this desktop session and also need an app or title; other windows matching that app/title are hidden from recordings.");
-        ruleNote->setWordWrap(true); exclusionLayout->addWidget(ruleNote);
-        tabs->addTab(exclusions, "&Exclusions");
+        exclusionLayout->addWidget(note("Address rules last for this desktop session. The capture mask also covers other windows matching the rule's app and title fields."));
+        details(exclusionLayout, "exclusionSettingsDetails",
+            "Address rules also need an app or title. Choose visible window fills the app and address for this session; choose visible app excludes every window from that app.");
+        section(exclusionLayout, "Help choosing exclusions");
+        exclusionLayout->addWidget(note("Tell your coding agent what to exclude, using this prompt."));
+        auto* exclusionPrompt = new QPushButton("Copy exclusions prompt"); exclusionPrompt->setObjectName("copyExclusionsPrompt");
+        exclusionLayout->addWidget(exclusionPrompt, 0, Qt::AlignLeft);
+        connect(exclusionPrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Exclusions); });
 
         error_ = new QLabel;
         error_->setObjectName("settingsError"); error_->setWordWrap(true); error_->setTextFormat(Qt::PlainText);
+        error_->hide();
         layout->addWidget(error_);
         promptNotice_ = new QLabel; promptNotice_->setObjectName("agentPromptNotice"); promptNotice_->setWordWrap(true);
+        promptNotice_->hide();
         layout->addWidget(promptNotice_);
         auto* footer = new QHBoxLayout;
         auto* setupPrompt = new QPushButton("Copy setup prompt"); setupPrompt->setObjectName("copySetupPrompt");
         footer->addWidget(setupPrompt); footer->addStretch();
         connect(setupPrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Setup); });
         buttons_ = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+        buttons_->button(QDialogButtonBox::Save)->setProperty("primary", true);
         buttons_->setObjectName("settingsButtons"); footer->addWidget(buttons_); layout->addLayout(footer);
         removeButtonIcons(this);
         connect(buttons_, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -641,12 +739,12 @@ public:
                 windows_->setItem(row, 2, address);
             }
             if (!configEditable_) {
-                error_->setText(resolved.configError + "\nShowing the last accepted settings. Copy the setup prompt to repair config.toml, then reopen Settings. Nothing has been changed.");
+                showError(resolved.configError + "\nShowing the last accepted settings. Copy the setup prompt to repair config.toml, then reopen Settings. Nothing has been changed.");
                 buttons_->button(QDialogButtonBox::Save)->setEnabled(false);
             }
         } catch (const std::exception& error) {
             configEditable_ = false;
-            error_->setText(QString::fromUtf8(error.what()) + "\nCorrect config.toml and reopen Settings. Existing settings have not been changed.");
+            showError(QString::fromUtf8(error.what()) + "\nCorrect config.toml and reopen Settings. Existing settings have not been changed.");
             buttons_->button(QDialogButtonBox::Save)->setEnabled(false);
         }
         const auto updateCapacity = [this] { updateStorageCapacity(); };
@@ -660,7 +758,7 @@ public:
         connect(&writer_, &QFutureWatcher<QString>::finished, this, [this] {
             const QString error = writer_.result();
             if (error.isEmpty()) accept();
-            else { error_->setText(error); buttons_->setEnabled(true); }
+            else { showError(error); buttons_->setEnabled(true); }
         });
         connect(&displays_, &QFutureWatcher<QJsonArray>::finished, this, [this] {
             const QString selected = output_->currentData().toString();
@@ -678,8 +776,8 @@ public:
             const int connected = output_->count() - 1;
             if (!selected.isEmpty() && output_->findData(selected) < 0) output_->addItem(selected + " · disconnected", selected);
             output_->setCurrentIndex(std::max(0, output_->findData(selected)));
-            displayNote_->setText(connected ? "Record one display. Replay keeps using the physical display you select."
-                : "No connected displays found. Your saved display is preserved; reconnect it and reopen Settings.");
+            displayNote_->setText(connected ? "Replay follows this physical display."
+                : "No displays found. Reconnect your saved display and reopen Settings.");
         });
         displays_.setFuture(QtConcurrent::run([displays = std::move(displays)] { try { return displays(); } catch (...) { return QJsonArray(); } }));
         output_->setFocus();
@@ -688,6 +786,11 @@ public:
 protected:
     void reject() override { if (!writer_.isRunning()) QDialog::reject(); }
 private:
+    void showError(const QString& message) {
+        error_->setText(message);
+        error_->setVisible(!message.isEmpty());
+    }
+
     void updateStorageCapacity() {
         const auto& saved = document_.config;
         const bool differentCapture = QDir(storage_->text()).absolutePath() != QDir(replayHistoryDirectory(saved)).absolutePath() ||
@@ -696,7 +799,8 @@ private:
             ((recordingStatus_.contains("interval_seconds") && recordingStatus_.value("interval_seconds").toDouble() != saved.intervalSeconds) ||
              (recordingStatus_.contains("output") && recordingStatus_.value("output").toString() != saved.output));
         if (differentCapture || unappliedCapture) {
-            capacity_->setText("The new folder, display or capture interval needs its own usage estimate. Oldest history rolls off at the size or age limit.");
+            capacity_->setText("A new folder, display or capture interval needs its own usage estimate.");
+            capacityDetails_->setText("Estimates reflect your saved capture settings. Record with the new settings to build a new estimate. Oldest history rolls off at the size or age limit.");
             capacity_->setToolTip({});
             return;
         }
@@ -710,7 +814,8 @@ private:
         options.retentionDays = days_->value();
         shown["storage_forecast"] = storageCapacityProjection(measured, options);
         shown["max_disk_mib"] = disk_->value();
-        capacity_->setText(storageCapacityText(shown, replayHistoryDirectory(saved)));
+        capacity_->setText(storageCapacitySummary(shown, replayHistoryDirectory(saved)));
+        capacityDetails_->setText(storageCapacityText(shown, replayHistoryDirectory(saved)));
         capacity_->setToolTip(!currentStorageStatus(shown, replayHistoryDirectory(saved)) ? QString()
             : measured.value("estimate_note").toString());
     }
@@ -726,7 +831,8 @@ private:
             replayHistoryDirectory(document_.config), shown, configEditable_};
         QApplication::clipboard()->setText(configurationAgentPrompt(topic, context));
         promptNotice_->setText("Prompt copied. Paste it into your coding agent and add your request.");
-        QTimer::singleShot(4000, this, [this] { promptNotice_->clear(); });
+        promptNotice_->show();
+        QTimer::singleShot(4000, this, [this] { promptNotice_->clear(); promptNotice_->hide(); });
     }
     void save() {
         if (!configEditable_) return;
@@ -755,7 +861,7 @@ private:
             config.excludedWindows.append(rule);
         }
         try { validateReplayConfig(config); }
-        catch (const std::exception& error) { error_->setText(QString::fromUtf8(error.what())); return; }
+        catch (const std::exception& error) { showError(QString::fromUtf8(error.what())); return; }
         QStringList deletionChanges;
         if (config.retentionDays < document_.config.retentionDays)
             deletionChanges << QString("history older than %1 days").arg(config.retentionDays);
@@ -782,7 +888,7 @@ private:
             confirmation.setDefaultButton(QMessageBox::Cancel);
             if (confirmation.exec() != QMessageBox::Save) return;
         }
-        buttons_->setEnabled(false); error_->setText("Saving settings…");
+        buttons_->setEnabled(false); showError("Saving settings…");
         const QByteArray original = document_.original;
         writer_.setFuture(QtConcurrent::run([config, original] {
             try { saveReplayConfig(config, original); return QString(); }
@@ -796,7 +902,7 @@ private:
     QString storageDirectory_;
     bool displayChosen_ = false;
     bool configEditable_ = false;
-    QLabel *displayNote_ = nullptr, *promptNotice_ = nullptr, *capacity_ = nullptr;
+    QLabel *displayNote_ = nullptr, *promptNotice_ = nullptr, *capacity_ = nullptr, *capacityDetails_ = nullptr;
     QDoubleSpinBox* interval_ = nullptr;
     QSpinBox *days_ = nullptr, *disk_ = nullptr, *free_ = nullptr, *idle_ = nullptr;
     QCheckBox* login_ = nullptr;
@@ -870,15 +976,26 @@ public:
         header->addWidget(helpToggle_);
         layout->addLayout(header);
 
-        details_ = new QWidget;
+        detailsScroll_ = new QScrollArea;
+        details_ = detailsScroll_;
         details_->setObjectName("detailsPanel");
-        auto* detailLayout = new QVBoxLayout(details_);
-        detailLayout->setContentsMargins(18, 14, 18, 14);
-        detailLayout->setSpacing(10);
+        detailsScroll_->setWidgetResizable(true);
+        detailsScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        detailsScroll_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        detailsScroll_->setFocusPolicy(Qt::NoFocus);
+        detailsContents_ = new QWidget;
+        detailsContents_->setMaximumWidth(1160);
+        detailsContents_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        panelColumns_ = new QBoxLayout(QBoxLayout::LeftToRight, detailsContents_);
+        panelColumns_->setContentsMargins(18, 14, 18, 14);
+        panelColumns_->setSpacing(32);
+        detailsScroll_->setWidget(detailsContents_);
+        detailsContents_->setAutoFillBackground(false);
         recordingPanel_ = new QWidget;
         recordingPanel_->setObjectName("recordingPanel");
         auto* recordingLayout = new QVBoxLayout(recordingPanel_);
-        recordingLayout->setContentsMargins(0, 0, 0, 8);
+        recordingLayout->setContentsMargins(0, 0, 0, 0);
+        recordingLayout->setSpacing(8);
         auto* recordingHeader = new QHBoxLayout;
         auto* recordingTitle = new QLabel("Recording");
         auto recordingFont = recordingTitle->font(); recordingFont.setBold(true); recordingTitle->setFont(recordingFont);
@@ -889,7 +1006,7 @@ public:
         recordingStop_->setObjectName("stopRecordingService");
         auto* settings = new QPushButton("Settings"); settings->setObjectName("openReplaySettings");
         deleteRecent_ = new QPushButton("Delete recent…"); deleteRecent_->setObjectName("deleteRecentHistory");
-        for (auto* button : {recordingAction_, recordingStop_, settings, deleteRecent_}) recordingHeader->addWidget(button);
+        recordingHeader->addWidget(settings);
         recordingLayout->addLayout(recordingHeader);
         recordingState_ = new QLabel;
         recordingState_->setObjectName("recordingStatus"); recordingState_->setWordWrap(true); recordingState_->setTextFormat(Qt::PlainText);
@@ -897,8 +1014,27 @@ public:
         storageCapacity_ = new QLabel;
         storageCapacity_->setObjectName("recordingStorageCapacity"); storageCapacity_->setWordWrap(true); storageCapacity_->setTextFormat(Qt::PlainText);
         recordingLayout->addWidget(storageCapacity_);
+        auto* recordingActions = new QHBoxLayout;
+        for (auto* button : {recordingAction_, recordingStop_, deleteRecent_}) recordingActions->addWidget(button);
+        recordingActions->addStretch(); recordingLayout->addLayout(recordingActions);
+        auto* storageDetailsToggle = new QPushButton("Storage details");
+        storageDetailsToggle->setObjectName("toggleStorageDetails"); storageDetailsToggle->setCheckable(true);
+        recordingLayout->addWidget(storageDetailsToggle, 0, Qt::AlignLeft);
+        storageDetails_ = new QLabel;
+        storageDetails_->setObjectName("recordingStorageDetails"); storageDetails_->setWordWrap(true); storageDetails_->setTextFormat(Qt::PlainText);
+        storageDetails_->hide(); recordingLayout->addWidget(storageDetails_);
+        connect(storageDetailsToggle, &QPushButton::toggled, this, [this, storageDetailsToggle](bool shown) {
+            storageDetailsToggle->setText(shown ? "Hide storage details" : "Storage details");
+            storageDetails_->setVisible(shown); fitDetailsPanel();
+        });
+        recordingLayout->addStretch();
         recordingPanel_->setVisible(sharedHistory_);
-        detailLayout->addWidget(recordingPanel_);
+        panelColumns_->addWidget(recordingPanel_, 1);
+        auto* indexPanel = new QWidget;
+        indexPanel->setFont(font());
+        auto* detailLayout = new QVBoxLayout(indexPanel);
+        detailLayout->setContentsMargins(0, 0, 0, 0); detailLayout->setSpacing(8);
+        panelColumns_->addWidget(indexPanel, 1);
         connect(recordingAction_, &QPushButton::clicked, this, [this] { requestRecording(recordingAction_->property("action").toString()); });
         connect(recordingStop_, &QPushButton::clicked, this, [this] { requestRecording("stop"); });
         connect(settings, &QPushButton::clicked, this, [this] { showSettings(); });
@@ -937,6 +1073,9 @@ public:
         workerHint_->setTextFormat(Qt::PlainText);
         workerHint_->setWordWrap(true);
         detailLayout->addWidget(workerHint_);
+        pendingAge_ = new QLabel;
+        pendingAge_->setObjectName("indexPendingAge"); pendingAge_->setWordWrap(true); pendingAge_->setTextFormat(Qt::PlainText);
+        detailLayout->addWidget(pendingAge_);
         priorityStatus_ = new QLabel;
         priorityStatus_->setObjectName("indexingRequestStatus");
         priorityStatus_->setTextFormat(Qt::PlainText);
@@ -953,10 +1092,26 @@ public:
         for (auto* button : {processMoment_, catchUp_, copyWorkerCommand_}) actions->addWidget(button);
         actions->addStretch();
         detailLayout->addLayout(actions);
+        auto* workerDetailsToggle = new QPushButton("Processing details");
+        workerDetailsToggle->setObjectName("toggleIndexDetails"); workerDetailsToggle->setCheckable(true);
+        detailLayout->addWidget(workerDetailsToggle, 0, Qt::AlignLeft);
+        workerDetails_ = new QLabel;
+        workerDetails_->setObjectName("indexWorkerDetails"); workerDetails_->setWordWrap(true); workerDetails_->setTextFormat(Qt::PlainText);
+        workerDetails_->hide(); detailLayout->addWidget(workerDetails_);
+        connect(workerDetailsToggle, &QPushButton::toggled, this, [this, workerDetailsToggle](bool shown) {
+            workerDetailsToggle->setText(shown ? "Hide processing details" : "Processing details");
+            workerDetails_->setVisible(shown); fitDetailsPanel();
+        });
+        detailLayout->addStretch();
+        for (auto* label : {recordingState_, storageCapacity_, storageDetails_, status_, workerHint_, pendingAge_, priorityStatus_, workerDetails_}) {
+            label->setMinimumWidth(0);
+            label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        }
         details_->hide();
         connect(detailsToggle_, &QPushButton::toggled, this, [this](bool shown) {
             if (shown) helpToggle_->setChecked(false);
             details_->setVisible(shown);
+            if (shown) fitDetailsPanel();
         });
         layout->addWidget(details_);
         help_ = new QWidget;
@@ -1227,6 +1382,11 @@ protected:
         QWidget::closeEvent(event);
     }
 
+    void resizeEvent(QResizeEvent* event) override {
+        QWidget::resizeEvent(event);
+        if (detailsScroll_) fitDetailsPanel();
+    }
+
     bool eventFilter(QObject* object, QEvent* event) override {
         if (event->type() == QEvent::KeyPress) {
             auto* key = static_cast<QKeyEvent*>(event);
@@ -1292,6 +1452,16 @@ protected:
     }
 
 private:
+    void fitDetailsPanel() {
+        const bool columns = sharedHistory_ && width() >= 1040;
+        panelColumns_->setDirection(columns ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+        detailsContents_->setMaximumWidth(columns ? 1160 : 740);
+        const int available = std::min(detailsContents_->maximumWidth(), std::max(1, width() - 40));
+        const int preferred = panelColumns_->hasHeightForWidth()
+            ? panelColumns_->totalHeightForWidth(available) : panelColumns_->sizeHint().height();
+        detailsScroll_->setFixedHeight(std::min(std::max(120, preferred + 4), std::max(160, height() / 2)));
+    }
+
     bool followConfiguredHistory(const QJsonObject& status) {
         const QString history = status.value("history_directory").toString();
         if (!sharedHistory_ || history.isEmpty() || !status.value("config_error").toString().isEmpty() ||
@@ -1337,12 +1507,14 @@ private:
         else message << states.value(state, "Waiting to record.");
         if (state == "recording" && !recording_.value("output").toString().isEmpty()) message.last() += " " + recording_.value("output").toString() + ".";
         for (const auto& value : {recording_.value("reason").toString(), recording_.value("config_error").toString(), recording_.value("storage_error").toString(), recordingMessage_})
-            if (!value.isEmpty()) message << value;
-        recordingState_->setText(message.join(' '));
-        storageCapacity_->setText(storageCapacityText(recording_, directory_));
+            if (!value.isEmpty() && value != "Recording the selected display." && !message.contains(value)) message << value;
+        recordingState_->setText(message.join('\n'));
+        storageCapacity_->setText(storageCapacitySummary(recording_, directory_));
+        storageDetails_->setText(storageCapacityText(recording_, directory_));
         storageCapacity_->setToolTip(currentStorageStatus(recording_, directory_)
             ? recording_.value("storage_forecast").toObject().value("estimate_note").toString() : QString());
         setProperty("recordingState", state);
+        fitDetailsPanel();
     }
 
     void requestRecording(const QString& action, const QJsonObject& arguments = {}) {
@@ -1775,11 +1947,11 @@ private:
         const bool fixed = servicePolicy_.value("scheduler").toString() == "fixed";
         const bool catchUpActive = catchUpUntil_ > QDateTime::currentMSecsSinceEpoch();
         QStringList counts;
-        counts << QString("%1 of %2 moments ready").arg(ready_).arg(totalFrames_);
+        counts << QString("%1 / %2 searchable").arg(ready_).arg(totalFrames_);
         if (pending_ > 0) counts << QString("%1 pending").arg(pending_);
         if (failed_ > 0) counts << QString("%1 failed").arg(failed_);
-        if (disabled_ > 0) counts << QString("%1 indexing disabled").arg(disabled_);
-        if (legacy_) counts << "Original indexing status not recorded";
+        if (disabled_ > 0) counts << QString("%1 disabled").arg(disabled_);
+        if (legacy_) counts << "Index status unavailable";
         status_->setText(counts.join("  ·  "));
         indexProgress_->setValue(totalFrames_ > 0 ? int(1000. * ready_ / totalFrames_) : 0);
         indexProgress_->setVisible(totalFrames_ > 0 && !legacy_);
@@ -1804,7 +1976,7 @@ private:
         else if (!requestMessage_.isEmpty()) messages << requestMessage_;
         if (priorityPending_ > 0) messages << QString("%1 pending moments are prioritized.").arg(priorityPending_);
         if (catchUpActive) messages << "Catch-up requested until " + QDateTime::fromMSecsSinceEpoch(catchUpUntil_).toString("HH:mm:ss") + ".";
-        priorityStatus_->setText(messages.join(' '));
+        priorityStatus_->setText(messages.join('\n'));
         priorityStatus_->setVisible(!messages.isEmpty());
         const QString state = service_.value("state").toString();
         QString activity;
@@ -1817,14 +1989,14 @@ private:
             activity = "Background indexing is stopped.";
         else if (paused) activity = external ? "Background service paused; another worker is still indexing."
             : service_.value("worker_running").toBool() ? "Pausing background indexing…"
-            : "Paused. Saved moments will wait until you resume.";
+            : "Paused. Resume to make waiting moments searchable.";
         else if (external) activity = "Another worker is indexing this history.";
         else if (state == "pressure") activity = "Working gently while the computer is busy.";
         else if (state == "requested") activity = "Catching up on requested moments.";
         else if (state == "idle" && pending_ > 0) activity = "Catching up while the computer is idle.";
-        else if (running && pending_ == 0 && failed_ > 0) activity = "No pending work. Failed moments still need attention.";
-        else if (running && pending_ == 0 && disabled_ > 0) activity = "No pending work. Some moments have indexing disabled.";
-        else if (running && pending_ == 0) activity = "Up to date. Background indexing is ready for new moments.";
+        else if (running && pending_ == 0 && failed_ > 0) activity = "Failed moments need attention.";
+        else if (running && pending_ == 0 && disabled_ > 0) activity = "Some moments have indexing disabled.";
+        else if (running && pending_ == 0) activity = "Up to date.";
         else if (state == "waiting" && running) activity = "Waiting to start the next indexing pass.";
         else if (state == "unknown" && indexerRunning_)
             activity = service_.value("effective_cpu_percent").isDouble()
@@ -1834,7 +2006,6 @@ private:
         else if (running) activity = "Background indexing is starting.";
         else if (pending_ > 0 || configured) activity = "Background indexing is stopped.";
         QStringList details;
-        if (!activity.isEmpty()) details << activity;
         const auto budget = service_.value("effective_cpu_percent");
         const qint64 policyAge = service_.value("policy_age_ms").toInteger(-1);
         if (budget.isDouble() && policyAge >= 0 && policyAge < 15000 && indexerRunning_)
@@ -1843,7 +2014,7 @@ private:
         const auto resources = service_.value("worker_policy").toObject().value("resources").toObject();
         if (indexerRunning_ && policyAge >= 0 && policyAge < 15000) {
             if (resources.value("enforced").toBool())
-                details << QString("Worker ceiling: %1% of one core; low priority.")
+                details << QString("Worker ceiling: %1% of one core · low priority")
                     .arg(resources.value("effective_cpu_percent").toDouble(), 0, 'g', 3);
             else if (resources.value("state").toString() == "unavailable")
                 details << "Worker ceiling unavailable; OCR pacing and low priority remain active.";
@@ -1856,10 +2027,15 @@ private:
             else if (servicePolicy_.contains("ocr_cpu_ceiling_percent")) details << QString("Configured worker ceiling: %1% of one core; checked when indexing starts.")
                 .arg(servicePolicy_.value("ocr_cpu_ceiling_percent").toDouble(), 0, 'g', 3);
         }
-        if (pending_ > 0) details << "Oldest waiting moment: " + elapsedDescription(oldestPendingMs_) + ".";
-        workerHint_->setText(details.join(' '));
+        const QString recovery = service_.value("recovery").toString();
+        if (!recovery.isEmpty()) details << recovery;
+        workerDetails_->setText(details.isEmpty() ? "CPU details appear when an indexing worker is available." : details.join('\n'));
+        pendingAge_->setText(pending_ > 0 ? "Oldest waiting: " + elapsedDescription(oldestPendingMs_) : QString());
+        pendingAge_->setVisible(pending_ > 0);
+        workerHint_->setText(activity);
         workerHint_->setToolTip(service_.value("recovery").toString());
-        workerHint_->setVisible(!details.isEmpty());
+        workerHint_->setVisible(!activity.isEmpty());
+        fitDetailsPanel();
     }
 
     void requestService(const QString& action) {
@@ -2001,6 +2177,9 @@ private:
     TimelineView* timeline_ = nullptr;
     TimelineOverview overview_;
     QWidget* details_ = nullptr;
+    QScrollArea* detailsScroll_ = nullptr;
+    QWidget* detailsContents_ = nullptr;
+    QBoxLayout* panelColumns_ = nullptr;
     QWidget* help_ = nullptr;
     QWidget* matchReadout_ = nullptr;
     QPushButton* helpToggle_ = nullptr;
@@ -2025,6 +2204,7 @@ private:
     QPushButton *recordingAction_ = nullptr, *recordingStop_ = nullptr, *deleteRecent_ = nullptr;
     QLabel* recordingState_ = nullptr;
     QLabel* storageCapacity_ = nullptr;
+    QLabel* storageDetails_ = nullptr;
     QFutureWatcher<ServiceControlResult> recordingRequest_;
     std::shared_ptr<std::atomic_bool> closing_ = std::make_shared<std::atomic_bool>(false);
     QString completedQuery_;
@@ -2047,6 +2227,8 @@ private:
     QLabel* status_ = nullptr;
     QLabel* priorityStatus_ = nullptr;
     QLabel* workerHint_ = nullptr;
+    QLabel* workerDetails_ = nullptr;
+    QLabel* pendingAge_ = nullptr;
     EvidenceView* evidence_ = nullptr;
     QPushButton* previous_ = nullptr;
     QPushButton* next_ = nullptr;

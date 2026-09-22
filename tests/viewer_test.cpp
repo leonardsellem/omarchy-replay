@@ -33,6 +33,7 @@
 #include <QProcess>
 #include <QSlider>
 #include <QScrollBar>
+#include <QScrollArea>
 #include <QJsonDocument>
 #include <QKeyEvent>
 #include <QTemporaryDir>
@@ -302,7 +303,9 @@ private slots:
         QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
         QTest::keyClick(viewer.get(), Qt::Key_I);
         auto* capacity = viewer->findChild<QLabel*>("recordingStorageCapacity");
+        auto* details = viewer->findChild<QLabel*>("recordingStorageDetails");
         QVERIFY(capacity && capacity->isVisible());
+        QVERIFY(details && !details->isVisible());
         QVERIFY(viewer->findChild<QLabel*>("recordingStatus")->text().contains("Rolling out oldest history"));
         QVERIFY(capacity->text().contains("8.0 / 10.0 GiB used"));
         QVERIFY(capacity->text().contains("4.0 active recording hours"));
@@ -314,8 +317,9 @@ private slots:
         refresh({{"state", "ready"}, {"capacity_active_hours", .5}, {"warning", "free-space"},
             {"limiting_factor", "free-space"}, {"limited_sample", true}});
         QTRY_VERIFY(capacity->text().contains("0.5 active recording hours"));
-        QVERIFY(capacity->text().contains("Available disk space reduces this capacity"));
-        QVERIFY(capacity->text().contains("recording continues"));
+        QVERIFY(capacity->text().contains("Limited by available disk space"));
+        QVERIFY(details->text().contains("Available disk space reduces this capacity"));
+        QVERIFY(details->text().contains("recording continues"));
         QVERIFY(!capacity->text().contains("Capture pauses"));
         refresh({{"state", "insufficient-data"}, {"warning", "none"}, {"limiting_factor", "allowance"}});
         QTRY_VERIFY(capacity->text().contains("More recorded history"));
@@ -331,7 +335,8 @@ private slots:
             service.status["storage_forecast"] = QJsonObject{{"state", "ready"}, {"capacity_active_hours", 4.0}};
         }
         viewer->findChild<QPushButton*>("refreshHistory")->click();
-        QTRY_VERIFY(capacity->text().contains("background service is stopped"));
+        QTRY_VERIFY(capacity->text().contains("service is stopped"));
+        QVERIFY(details->text().contains("background service is stopped"));
         QVERIFY(!capacity->text().contains("4.0"));
         {
             QMutexLocker guard(&service.mutex);
@@ -340,7 +345,8 @@ private slots:
             service.status["storage_available"] = false;
         }
         viewer->findChild<QPushButton*>("refreshHistory")->click();
-        QTRY_VERIFY(capacity->text().contains("unavailable for this history folder"));
+        QTRY_VERIFY(capacity->text().contains("unavailable for this folder"));
+        QVERIFY(details->text().contains("unavailable for this history folder"));
         QVERIFY(!capacity->text().contains("4.0"));
         QCOMPARE(viewer->property("historyDirectory").toString(), directory);
         QVERIFY(service.calls().isEmpty());
@@ -374,23 +380,31 @@ private slots:
         QTimer::singleShot(0, [&] {
             auto* dialog = viewer->findChild<QDialog*>("replaySettings"); QVERIFY(dialog);
             auto* capacity = dialog->findChild<QLabel*>("settingsStorageCapacity"); QVERIFY(capacity);
-            QVERIFY(capacity->text().contains("4.0 active recording hours"));
+            auto* details = dialog->findChild<QLabel*>("settingsStorageDetails"); QVERIFY(details);
+            QVERIFY(!details->isVisible());
+            QVERIFY(capacity->text().contains("About 10.0 days of history"));
+            QVERIFY(details->text().contains("4.0 active recording hours"));
             auto* limit = dialog->findChild<QSpinBox*>("settingMaxDiskMiB");
             limit->setValue(20480);
-            QVERIFY(capacity->text().contains("8.0 active recording hours"));
-            QVERIFY(capacity->text().contains("About 20.0 days at your observed usage"));
+            QVERIFY(capacity->text().contains("About 20.0 days of history"));
+            QVERIFY(details->text().contains("8.0 active recording hours"));
+            QVERIFY(details->text().contains("About 20.0 days at your observed usage"));
             QVERIFY(!capacity->text().contains("Save recording"));
             limit->setValue(10240);
-            QVERIFY(capacity->text().contains("4.0 active recording hours"));
+            QVERIFY(capacity->text().contains("About 10.0 days of history"));
+            QVERIFY(details->text().contains("4.0 active recording hours"));
             auto* free = dialog->findChild<QSpinBox*>("settingMinFreeMiB");
             free->setValue(40960);
-            QVERIFY(capacity->text().contains("0.0 active recording hours"));
-            QVERIFY(capacity->text().contains("Available disk space reduces this capacity"));
+            QVERIFY(capacity->text().contains("About 0.0 days of history"));
+            QVERIFY(details->text().contains("0.0 active recording hours"));
+            QVERIFY(capacity->text().contains("Limited by available disk space"));
+            QVERIFY(details->text().contains("Available disk space reduces this capacity"));
             free->setValue(1024);
-            QVERIFY(capacity->text().contains("4.0 active recording hours"));
+            QVERIFY(capacity->text().contains("About 10.0 days of history"));
+            QVERIFY(details->text().contains("4.0 active recording hours"));
             auto* retention = dialog->findChild<QSpinBox*>("settingRetentionDays");
             retention->setValue(14);
-            QVERIFY(capacity->text().contains("14 days would need roughly 14.0 GiB"));
+            QVERIFY(details->text().contains("14 days would need roughly 14.0 GiB"));
             auto* interval = dialog->findChild<QDoubleSpinBox*>("settingInterval");
             interval->setValue(10);
             QVERIFY(capacity->text().contains("needs its own usage estimate"));
@@ -399,12 +413,150 @@ private slots:
             folder->setText(temporary.filePath("other-disk/history"));
             QVERIFY(!capacity->text().contains("4.0"));
             folder->setText(directory);
-            QVERIFY(capacity->text().contains("4.0 active recording hours"));
+            QVERIFY(capacity->text().contains("About 10.0 days of history"));
+            QVERIFY(details->text().contains("4.0 active recording hours"));
             checked = true;
             QTest::keyClick(dialog, Qt::Key_Escape);
         });
         viewer->findChild<QPushButton*>("openReplaySettings")->click();
         QVERIFY(checked);
+        QCOMPARE(replay::loadReplayConfig().original, original);
+        QVERIFY(service.calls().isEmpty());
+        viewer->close();
+    }
+
+    void compactPanelsKeepStatusAndKeyboardDetailsAccessible() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        ViewerEnvironment environment(temporary.path());
+        auto document = replay::loadReplayConfig();
+        document.config.output = "SYNTHETIC-1";
+        replay::saveReplayConfig(document.config, document.original);
+        const QByteArray original = replay::loadReplayConfig().original;
+        const QString directory = replay::replayHistoryDirectory(document.config);
+        replay::RecorderOptions options;
+        options.directory = directory; options.deferredOcr = true; options.minFreeBytes = 0;
+        std::array<qint64, 3> ids{};
+        {
+            replay::Recorder recorder(options);
+            for (int i = 0; i < 3; ++i)
+                ids[i] = recorder.addFrame(prefixScreen("Synthetic notes for panel review", i),
+                    QDateTime::currentMSecsSinceEpoch() - (9 - i) * 60000).frameId;
+            recorder.finish();
+        }
+        QVERIFY(indexText(directory, ids[0], "Synthetic notes for panel review"));
+        QVERIFY(indexText(directory, ids[1], "Synthetic notes for panel review"));
+        FakeRecording service;
+        service.status = {{"running", true}, {"intent", "running"}, {"state", "recording"},
+            {"output", "SYNTHETIC-1"}, {"indexing", false}, {"indexing_paused", true},
+            {"history_directory", directory}, {"max_disk_mib", 10240},
+            {"usage", QJsonObject{{"disk_bytes", 8.0 * 1024 * 1024 * 1024}}},
+            {"storage_forecast", QJsonObject{{"state", "ready"}, {"capacity_active_hours", 4.0},
+                {"bytes_per_active_hour", 2.5 * 1024 * 1024 * 1024},
+                {"filesystem_free_bytes", 32.0 * 1024 * 1024 * 1024}, {"warning", "none"}}},
+            {"worker_resources", QJsonObject{{"enforced", true}, {"effective_cpu_percent", 60}}}};
+        auto viewer = replay::createViewer(directory, service.hooks());
+        viewer->resize(1440, 920); viewer->show(); viewer->activateWindow();
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), ids[2]);
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_I);
+        auto* panel = viewer->findChild<QScrollArea*>("detailsPanel"); QVERIFY(panel);
+        auto* storage = viewer->findChild<QLabel*>("recordingStorageDetails"); QVERIFY(storage);
+        auto* worker = viewer->findChild<QLabel*>("indexWorkerDetails"); QVERIFY(worker);
+        QVERIFY(!storage->isVisible()); QVERIFY(!worker->isVisible());
+        QVERIFY(viewer->findChild<QLabel*>("recallStatus")->text().contains("2 / 3 searchable"));
+        QVERIFY(viewer->findChild<QLabel*>("recallStatus")->text().contains("1 pending"));
+        QVERIFY(viewer->findChild<QLabel*>("indexPendingAge")->text().contains("7 min"));
+        QVERIFY(viewer->findChild<QLabel*>("indexWorkerHint")->text().contains("Paused"));
+        QVERIFY(viewer->findChild<QLabel*>("recordingStorageCapacity")->text().contains("8.0 / 10.0 GiB"));
+        QVERIFY(worker->text().contains("60% of one core"));
+        const auto focusByTab = [](QWidget* from, QWidget* target) {
+            from->setFocus();
+            for (int i = 0; i < 100 && !target->hasFocus(); ++i)
+                QTest::keyClick(QApplication::focusWidget(), Qt::Key_Tab);
+            return target->hasFocus();
+        };
+        const auto horizontallyContained = [](QScrollArea* scroll) {
+            if (scroll->horizontalScrollBar()->maximum() != 0) return false;
+            for (const auto* button : scroll->widget()->findChildren<QPushButton*>()) {
+                if (!button->isVisible()) continue;
+                const QPoint position = button->mapTo(scroll->viewport(), QPoint());
+                if (position.x() < 0 || position.x() + button->width() > scroll->viewport()->width()) return false;
+            }
+            return true;
+        };
+        QVERIFY(QDir().mkpath("runs/panel-clarity"));
+        for (const auto& size : {QSize(1440, 920), QSize(900, 620)}) {
+            viewer->resize(size); QTest::qWait(60);
+            QVERIFY(horizontallyContained(panel));
+            QVERIFY(viewer->grab().save(QString("runs/panel-clarity/index-%1-primary.png").arg(size.width())));
+            for (const QString& name : {"toggleStorageDetails", "toggleIndexDetails"}) {
+                auto* toggle = viewer->findChild<QPushButton*>(name); QVERIFY(toggle);
+                QVERIFY(focusByTab(viewer->findChild<QPushButton*>("toggleDetails"), toggle));
+                QTest::keyClick(toggle, Qt::Key_Space); QVERIFY(toggle->isChecked());
+            }
+            QTest::qWait(60);
+            QVERIFY(storage->isVisible()); QVERIFY(worker->isVisible());
+            QVERIFY(horizontallyContained(panel));
+            panel->verticalScrollBar()->setValue(0);
+            QVERIFY(viewer->grab().save(QString("runs/panel-clarity/index-%1-expanded.png").arg(size.width())));
+            panel->ensureWidgetVisible(worker);
+            QVERIFY(panel->viewport()->rect().intersects(QRect(worker->mapTo(panel->viewport(), QPoint()), worker->size())));
+            if (size.width() == 900) QVERIFY(panel->verticalScrollBar()->maximum() > 0);
+            for (const QString& name : {"toggleStorageDetails", "toggleIndexDetails"}) {
+                auto* toggle = viewer->findChild<QPushButton*>(name);
+                toggle->setFocus(); QTest::keyClick(toggle, Qt::Key_Space); QVERIFY(!toggle->isChecked());
+            }
+            panel->verticalScrollBar()->setValue(0);
+        }
+        bool settingsChecked = false;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = viewer->findChild<QDialog*>("replaySettings"); QVERIFY(dialog);
+            // A failed assertion must not leave this modal test hanging.
+            QTimer::singleShot(15000, dialog, &QDialog::reject);
+            for (const QString& name : {"settingsError", "agentPromptNotice"}) {
+                auto* label = dialog->findChild<QLabel*>(name); QVERIFY(label);
+                QVERIFY(label->text().isEmpty()); QVERIFY(label->isHidden());
+            }
+            auto* tabs = dialog->findChild<QTabWidget*>("settingsTabs"); QVERIFY(tabs);
+            auto* output = dialog->findChild<QComboBox*>("settingOutput"); QVERIFY(output);
+            QTRY_VERIFY(output->findData("SYNTHETIC-2") >= 0);
+            for (const QString& name : {"captureSettingsDetailsText", "settingsStorageDetails", "storageSettingsDetailsText",
+                                        "resourceSettingsDetailsText", "exclusionSettingsDetailsText"}) {
+                auto* label = dialog->findChild<QLabel*>(name); QVERIFY(label); QVERIFY(label->isHidden());
+            }
+            const std::array<QString, 3> pages{"recordingSettingsScroll", "resourceSettingsScroll", "exclusionSettingsScroll"};
+            const std::array<QString, 3> toggles{"storageCapacityDetails", "resourceSettingsDetails", "exclusionSettingsDetails"};
+            for (const auto& size : {QSize(740, 740), QSize(600, 560)}) {
+                dialog->resize(size);
+                for (int i = 0; i < 3; ++i) {
+                    tabs->setCurrentIndex(i); QTest::qWait(60);
+                    auto* scroll = dialog->findChild<QScrollArea*>(pages[i]); QVERIFY(scroll);
+                    scroll->verticalScrollBar()->setValue(0);
+                    QVERIFY(horizontallyContained(scroll));
+                    auto* buttons = dialog->findChild<QDialogButtonBox*>("settingsButtons"); QVERIFY(buttons);
+                    for (auto role : {QDialogButtonBox::Save, QDialogButtonBox::Cancel}) {
+                        auto* button = buttons->button(role); QVERIFY(button && button->isVisible());
+                        QVERIFY(dialog->rect().contains(QRect(button->mapTo(dialog, QPoint()), button->size())));
+                    }
+                    QVERIFY(dialog->grab().save(QString("runs/panel-clarity/settings-%1-tab%2-primary.png").arg(size.width()).arg(i)));
+                    auto* toggle = dialog->findChild<QPushButton*>(toggles[i]); QVERIFY(toggle);
+                    QVERIFY(focusByTab(tabs, toggle));
+                    QTest::keyClick(toggle, Qt::Key_Space); QVERIFY(toggle->isChecked());
+                    QTest::qWait(30); QVERIFY(horizontallyContained(scroll));
+                    scroll->ensureWidgetVisible(toggle);
+                    QVERIFY(scroll->viewport()->rect().intersects(QRect(toggle->mapTo(scroll->viewport(), QPoint()), toggle->size())));
+                    if (size.height() == 560) QVERIFY(scroll->verticalScrollBar()->maximum() > 0);
+                    scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
+                    QVERIFY(dialog->grab().save(QString("runs/panel-clarity/settings-%1-tab%2-details.png").arg(size.width()).arg(i)));
+                    QTest::keyClick(toggle, Qt::Key_Space); QVERIFY(!toggle->isChecked());
+                }
+            }
+            settingsChecked = true;
+            QTest::keyClick(dialog, Qt::Key_Escape);
+        });
+        viewer->findChild<QPushButton*>("openReplaySettings")->click();
+        QVERIFY(settingsChecked);
         QCOMPARE(replay::loadReplayConfig().original, original);
         QVERIFY(service.calls().isEmpty());
         viewer->close();
@@ -530,6 +682,9 @@ private slots:
             QCOMPARE(folder->text(), originalHistory); QVERIFY(folder->isReadOnly());
             for (const QString& name : {"copySetupPrompt", "copyResourcesPrompt", "copyExclusionsPrompt"}) {
                 dialog->findChild<QPushButton*>(name)->click();
+                auto* notice = dialog->findChild<QLabel*>("agentPromptNotice"); QVERIFY(notice);
+                QVERIFY(notice->isVisible()); QVERIFY(!notice->text().isEmpty());
+                QVERIFY(dialog->findChild<QLabel*>("settingsError")->isHidden());
                 const QString prompt = QApplication::clipboard()->text();
                 QVERIFY(prompt.contains("https://github.com/rblalock/omarchy-replay"));
                 QVERIFY(!prompt.contains("/README.md"));
@@ -605,9 +760,13 @@ private slots:
             auto* settings = viewer->findChild<QDialog*>("replaySettings"); QVERIFY(settings);
             inspected = true;
             QVERIFY(settings->findChild<QLabel*>("settingsError")->text().contains("last accepted settings"));
+            QVERIFY(settings->findChild<QLabel*>("settingsError")->isVisible());
+            QVERIFY(settings->findChild<QLabel*>("agentPromptNotice")->isHidden());
             QVERIFY(!settings->findChild<QDialogButtonBox*>("settingsButtons")->button(QDialogButtonBox::Save)->isEnabled());
             QCOMPARE(settings->findChild<QLineEdit*>("settingStorageDirectory")->text(), document.config.storageDirectory);
             settings->findChild<QPushButton*>("copySetupPrompt")->click();
+            QVERIFY(settings->findChild<QLabel*>("agentPromptNotice")->isVisible());
+            QVERIFY(settings->findChild<QLabel*>("settingsError")->isVisible());
             auto prompt = QApplication::clipboard()->text();
             QVERIFY(prompt.contains(document.config.storageDirectory));
             QVERIFY(prompt.contains(paths.configFile));
@@ -928,7 +1087,8 @@ private slots:
         QVERIFY(pendingViewer->findChild<QPushButton*>("catchUpIndexing")->isVisible());
         QVERIFY(pendingViewer->findChild<QPushButton*>("copyIndexCommand")->isVisible());
         QVERIFY(pendingViewer->findChild<QLabel*>("indexState")->isVisible());
-        QVERIFY(pendingViewer->findChild<QLabel*>("indexWorkerHint")->text().contains("waiting"));
+        QVERIFY(pendingViewer->findChild<QLabel*>("indexWorkerHint")->text().contains("stopped"));
+        QVERIFY(pendingViewer->findChild<QLabel*>("indexPendingAge")->text().contains("Oldest waiting"));
         QTest::qWait(60);
         QVERIFY(pendingViewer->grab().save("runs/design-review-v2/index-pending.png"));
         pendingViewer->close();
@@ -1459,7 +1619,7 @@ private slots:
         QVERIFY(action && stop && hint);
         QCOMPARE(action->text(), "Resume");
         QVERIFY(hint->text().contains("Paused"));
-        QVERIFY(hint->text().contains("7 min"));
+        QVERIFY(viewer->findChild<QLabel*>("indexPendingAge")->text().contains("7 min"));
         QVERIFY(!viewer->findChild<QPushButton*>("catchUpIndexing")->isEnabled());
         QVERIFY(!viewer->findChild<QPushButton*>("copyIndexCommand")->isVisible());
         QTest::keyClick(viewer.get(), Qt::Key_Escape);
@@ -1570,7 +1730,7 @@ private slots:
         QCOMPARE(storedNumber(options.directory, "SELECT request_order FROM index_schedule WHERE id=1"), order);
         QCOMPARE(viewer->property("selectedFrameId").toLongLong(), ids[2]);
         QVERIFY(hint->text().contains("indexing is stopped", Qt::CaseInsensitive));
-        QVERIFY(hint->text().contains("waiting", Qt::CaseInsensitive));
+        QVERIFY(viewer->findChild<QLabel*>("indexPendingAge")->text().contains("Oldest waiting"));
         QTest::mouseClick(viewer->findChild<QPushButton*>("toggleDetails"), Qt::LeftButton);
         QVERIFY(viewer->findChild<QPushButton*>("copyIndexCommand")->isVisible());
 
@@ -1601,7 +1761,8 @@ private slots:
             replay::publishIndexWorkerPolicy(options.directory, {{"mode", "pressure"}, {"effective_cpu_percent", 10}});
             QTest::keyClick(viewer.get(), Qt::Key_F5);
             QTRY_VERIFY(hint->text().startsWith("Another worker is indexing", Qt::CaseInsensitive));
-            QVERIFY(hint->text().contains("10% of one core"));
+            QVERIFY(!hint->text().contains("10% of one core"));
+            QVERIFY(viewer->findChild<QLabel*>("indexWorkerDetails")->text().contains("10% of one core"));
             QTRY_VERIFY(!viewer->findChild<QPushButton*>("copyIndexCommand")->isVisible());
             QCOMPARE(viewer->property("selectedFrameId").toLongLong(), ids[3]);
         }

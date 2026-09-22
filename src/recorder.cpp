@@ -471,7 +471,8 @@ QByteArray encodeWebP(const QImage &image) {
     WebPPicture picture;
     WebPMemoryWriter writer;
     if (!WebPConfigInit(&config) || !WebPPictureInit(&picture)) error("WebP initialization failed");
-    config.lossless = 1; config.quality = 0; config.method = 0; config.exact = 1;
+    // In lossless mode quality controls effort; keep the fast method and exact pixels.
+    config.lossless = 1; config.quality = 50; config.method = 0; config.exact = 1;
     config.thread_level = 0;
     picture.use_argb = 1; picture.width = image.width(); picture.height = image.height();
     WebPMemoryWriterInit(&writer);

@@ -17,10 +17,12 @@ The current setup uses `omarchy-replay` for configuration, data, state and the u
 - [Practical agent use-case research](screenpipe-agent-use-case-research.md): Screenpipe-inspired information retrieval and screen evidence for the user's coding agent; tool details to discuss at that milestone. Subsequent tasks belong to the agent and its instructions.
 - [Living exploration](omarchy-agent-exploration.md): product direction, use cases, decisions, and open questions.
 - [Interaction proposal](omarchy-recall-interaction.md): Rewind-inspired recall adapted to native keyboard-driven Omarchy use.
-- [Current viewer design](replay-viewer-design.md): the minimal timeline, immediate keyboard preview, OCR highlights, and quick launcher access; redesign implemented and locally verified.
+- [Current viewer design](replay-viewer-design.md): timeline, keyboard preview, OCR highlights, and compact recording/indexing controls with expandable details.
 - [Performance and feasibility plan](omarchy-recall-performance.md): resource requirements, pipeline candidates, and the proposed first proof.
 - [Capture and compression research](omarchy-recall-compression-research.md): historical Rewind evidence and pinned open-source findings.
-- [Storage efficiency options](storage-efficiency-options.md): lossless WebP effort, idle recompression, temporal storage and image-quality tradeoffs; proposed benchmarks.
+- [Storage efficiency options](storage-efficiency-options.md): the approved fast lossless WebP trial, idle recompression, temporal storage and image-quality tradeoffs.
+- [Lossless WebP effort experiment](webp-effort-experiment.md): measured synthetic size, CPU, memory, exact pixels and recompression costs behind the fast-setting capture trial.
+- [Fast WebP capture trial](fast-webp-capture-trial.md): paired production-pipeline results for the approved fast candidate, including retained coverage and exact OCR/highlight parity.
 - [Run the feasibility prototype](feasibility-prototype.md): build, synthetic demo, native viewer, finite recording, and repeatable checks.
 - [Run a personal trial](personal-trial.md): choose one monitor, collect a finite session with local diagnostics, and bring back useful feedback.
 - [First personal trial review](personal-trial-review-1.md): monitor-choice clarification, the paced OCR deadline failure, and corrections.

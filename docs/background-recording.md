@@ -18,6 +18,8 @@ If needed, inspect `systemctl --user show omarchy-replay.service -p ExecStart` t
 
 Settings has three tabs. All controls support native keyboard navigation; Save applies changes and Cancel leaves the file unchanged.
 
+Each tab groups related fields and scrolls in smaller windows. **Details** expands the longer explanations. Use Tab to reach a control and Space to toggle it; Save and Cancel stay outside the scrolling area.
+
 | Tab | Settings |
 | --- | --- |
 | Recording | Display, capture interval, history folder, retention, disk limits and login startup. |
@@ -39,9 +41,11 @@ The Display dropdown lists detected connectors with their model and resolution. 
 | Close the viewer | Leave recording and indexing choices unchanged. |
 | Delete recent… | Review and confirm permanent deletion of an interval. |
 
-The **I** panel shows capture state, indexing coverage and worker-limit availability. Capture waits while locked, asleep, inactive, disconnected from the selected display, blocked by an exclusion or unable to verify its environment. It resumes after a temporary block only when saved intent is running. Wake and unlock never override a manual pause or stop.
+The **I** panel separates Recording and Search index. It shows capture state, storage usage, searchable/pending counts and the oldest waiting age. **Storage details** expands the forecast explanation; **Processing details** shows CPU allowances and worker-limit availability. The sections sit side by side in wide windows and stack with scrolling in smaller ones.
 
-**Start at login** starts the installed coordinator with saved intent. It does not turn a stopped or paused recorder into a running one.
+Capture waits while locked, asleep, inactive, disconnected from the selected display, blocked by an exclusion or unable to verify its environment. It resumes after a temporary block only when saved intent is running. Wake and unlock never override a manual pause or stop.
+
+**Start Replay at login** starts the installed coordinator with saved intent. It does not turn a stopped or paused recorder into a running one.
 
 ## Storage
 
@@ -65,7 +69,9 @@ The defaults allow OCR **40% of one CPU core** during activity, **50%** after 60
 
 These values balance foreground work and indexing delay. Display resolution, changing pixels, text layout and CPU speed all affect throughput. Start with the defaults. If lag keeps growing or the desktop feels slower, use **Copy resources prompt** to have your agent inspect local status and make a measured adjustment. See [CPU scheduling](architecture.md#cpu-scheduling) for the policy and its limits.
 
-The **I** panel and Recording Settings show current usage and the approximate active recording hours that the whole allowance can hold. Changing the size previews capacity before saving. After retained history spans at least seven calendar days, Replay can also estimate days of history and the space needed for the chosen age window. A small allowance may never retain a full week; the active-hours estimate still works. Estimates use observed usage, with no assumed workday length. Changing the display, capture interval or folder starts a fresh usage sample. The active-hours estimate returns after five recorded minutes. Calendar estimates also wait for older observations to leave the archive.
+The **I** panel and Recording Settings show current usage and the estimated history the whole allowance can hold. The summary uses calendar days when available, otherwise active recording hours. Expand the storage details for both estimates and the space needed for the chosen age window. Changing the size previews capacity before saving.
+
+Calendar estimates require at least seven retained days. A small allowance may never retain a full week; the active-hours estimate still works. Estimates use observed usage, with no assumed workday length. Changing the display, capture interval or folder starts a fresh usage sample. The active-hours estimate returns after five recorded minutes. Calendar estimates also wait for older observations to leave the archive.
 
 ## Exclusions
 

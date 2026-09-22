@@ -1,10 +1,10 @@
 # Replay viewer: timeline and recall
 
-Updated: 2026-09-19. Status: timeline redesign implemented; prefix-search and panel refinement verification is recorded below. This records the current interface, not an all-day performance or reliability result.
+Updated: 2026-09-22. Status: timeline, prefix search and controls/settings refinement implemented. Dated verification notes appear below. This records interface behavior, not an all-day performance or reliability result.
 
 ## The shape of the viewer
 
-The saved screen takes most of the window. Search stays small at the top, and a timeline sits beneath the image. The header has no Replay title or close button; a quiet monochrome clear action appears within a nonempty search field. There is no permanent list of sequences or application grouping. The selected time stays visible. Text status appears only when indexing is pending, failed, disabled, or found no text. **Index** opens readiness and relevant processing actions; **?** opens separate keyboard help.
+The saved screen takes most of the window. Search stays small at the top, and a timeline sits beneath the image. The header has no Replay title or close button; a quiet monochrome clear action appears within a nonempty search field. There is no permanent list of sequences or application grouping. The selected time stays visible. Text status appears only when indexing is pending, failed, disabled, or found no text. **Controls** (**I**) opens recording and indexing status; **?** opens separate keyboard help.
 
 Replay reads the current Omarchy colors and terminal font when opened. The Rewind references guide the large preview, timeline, and quick entry/exit; their wallpaper and application lanes are not part of this design.
 
@@ -14,14 +14,7 @@ Search belongs beside the timeline. Small timestamp segments sit below the track
 
 ## Open, use, dismiss
 
-Run `./scripts/replay` from the project directory to open the latest saved trial, or use `./scripts/replay open --dir /absolute/path/to/dataset`. The launcher brings forward an existing mapped Hyprland viewer for that dataset when available. It never starts capture. The optional local desktop entry is named **Replay**; it opens the same path through the Omarchy application launcher. To generate and install it explicitly from the repository root:
-
-```bash
-mkdir -p ~/.local/share/applications
-./scripts/replay desktop-entry > ~/.local/share/applications/omarchy-replay.desktop
-```
-
-The entry points to this checkout; regenerate it if the checkout moves. It does not start recording or enable login startup.
+Open **Omarchy Replay** from the app launcher, or use **Super+Alt+R** when its shortcut is installed. The launcher brings forward an existing mapped Hyprland viewer for that archive when available. Opening history does not start capture or override a saved pause. Installed operation needs no source checkout; see [recording and configuration](background-recording.md) for setup and explicit archive commands.
 
 | Key | Action |
 | --- | --- |
@@ -61,11 +54,11 @@ Matches are chronological. The viewer loads 100 at a time; Up/Down continues acr
 
 Opening a saved personal trial preserves its fixed or adaptive scheduling settings. The launcher ensures an independent indexing service is available; closing the viewer leaves it working. A saved pause survives reopening. The service waits for an active recorder's worker and takes over after its exit. When caught up, the OCR child exits and releases its memory. An arbitrary dataset without saved policy remains view-only unless indexing is explicitly configured.
 
-**I** holds readiness counts, the oldest pending age, processing reason, current CPU allowance when known, and Start/Pause/Resume/Stop controls. Worker policy freshness is checked before displaying an allowance. An external worker is identified because service controls cannot stop somebody else's process. Errors remain in this panel and do not prevent browsing saved screens. Controls are reachable with Tab and Space. Selected pending moments still request priority; **P** prioritizes a moment and **C** requests catch-up under adaptive scheduling. Fixed scheduling disables the catch-up control because that policy cannot temporarily raise its CPU allowance.
+**I** shows readiness counts, oldest pending age, processing reason and Start/Pause/Resume/Stop controls. **Processing details** expands CPU information; worker policy freshness is checked before displaying an allowance. An external worker is identified because service controls cannot stop somebody else's process. Errors remain in this panel and do not prevent browsing saved screens. Controls are reachable with Tab and Space. Selected pending moments still request priority; **P** prioritizes a moment and **C** requests catch-up under adaptive scheduling. Fixed scheduling disables the catch-up control because that policy cannot temporarily raise its CPU allowance.
 
 Per-frame metadata includes timestamps, repeated-observation counts, image dimensions, and OCR/media state. The trial records its selected display and initial display properties. Application identities, window titles, browser URLs, and projects are not collected. OCR text is not substituted for verified application metadata. The match row therefore stays minimal instead of introducing guessed app labels.
 
-This is a viewer for one saved dataset at a time. A persistent Hyprland rule now excludes its window from native captures on the configured desktop, preventing recursive screen history. See the [installation and behavior](personal-trial.md#excluding-the-viewer). Unified history across trials, recording controls, retention cleanup, configurable app/window exclusions, pause-on-lock, and login autostart remain separate work. The indexing service runs only for explicitly opened/configured saved history; it does not start capture. The desktop entry provides quick access without enabling login autostart or adding a global keyboard binding.
+The viewer opens one archive at a time. Shared background recording, rolling retention, recording controls, app/window exclusions, pause-on-lock and optional login startup are implemented; [recording and configuration](background-recording.md) describes them. Legacy finite trials remain separate and are not silently merged. Replay's own window is masked from native capture to prevent recursive screen history.
 
 See [personal trials](personal-trial.md) for recording and feedback, and [adaptive indexing](adaptive-indexing-and-regions.md) for measured scheduling and resource behavior.
 
@@ -92,3 +85,15 @@ The final refinement rebuild passed `recall_geometry`, `viewer_keyboard`, `recor
 The next user trial prompted staged Escape behavior, removal of the header title, a monochrome search-clear icon, and matching-line clipboard copy. The rebuilt viewer and `recall_geometry` / `viewer_keyboard` suites pass (12.90 seconds). Tests verify Escape focus and panel transitions, navigation from neutral focus, query preservation, normal input copy, matching-line and explicit whole-screen copy, and unchanged clipboard contents when positions are loading or unavailable. Desktop/compact screenshots and keyboard help were inspected with synthetic content. Scheduling limits were unchanged; the [trial review](personal-trial-review-3.md) explains the observed backlog and later catch-up.
 
 The following trial removed raw OCR snippets from both the match row and time-segment tooltips. Match counts, timestamps, highlights, and matching-line copy remain. The [fourth trial review](personal-trial-review-4.md) records the metadata inventory, default scheduling correction, and viewer worker-recovery checks. The rebuilt viewer, synthetic desktop/compact inspection, and six relevant functional suites passed after these changes.
+
+## Controls and Settings readability, 2026-09-22
+
+The user found the status text dense and the Index panel's lines too long. Controls now separates Recording and Search index into bounded columns. Smaller windows stack them in a scrollable panel that leaves room for the saved image and timeline. The primary view shows capture state, storage used/capacity, searchable and pending counts, current indexing activity and the oldest waiting age. Storage calculations and CPU policy appear under text-only disclosure buttons. Failures and blocked states remain in the primary view.
+
+Following feedback that text-only actions blended into labels, buttons now have a visible border and subtle fill at rest. Hover, press, checked, disabled and keyboard-focus states are distinct; focus and press preserve the control's outer size. Settings Save uses the theme accent, while ordinary actions stay neutral. Expanded storage/processing buttons say **Hide…**. Fields also have clearer outlines. Labels and explanatory text stay unboxed; controls use no icons.
+
+Settings groups capture, history limits and storage location; Resources separates allowances from agent-assisted advice; Exclusions separates apps, window rules and agent help. Longer explanations use **Details** controls. Retention deletion and exclusion scope remain visible beside the relevant fields. Tabs scroll independently, while Save and Cancel stay visible. Empty error and clipboard notices take no space; populated notices remain visible.
+
+The change preserves configuration keys, capture/indexing intent, storage forecast calculations and copy-agent prompts. Disclosure controls support Tab and Space, including at compact sizes. Verification uses synthetic history and fake service responses; it does not inspect personal recordings or change the running coordinator.
+
+The Release build, including the button-affordance follow-up, passed 31 CTest suites; two opt-in native service suites were skipped (88.49 seconds total). Tests verify collapsed defaults, Tab/Space disclosure, horizontal containment, compact scrolling, persistent Save/Cancel access, visible errors and clipboard notices, and unchanged saved configuration. Synthetic visual inspection covered Controls at 1440×920 and 900×620 and Settings at 740×740 and 600×560, including selected, focused and disabled buttons. Local screenshots are under ignored `runs/panel-clarity/`; the latest regression log is `runs/button-affordance-tests.log`.

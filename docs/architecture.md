@@ -36,6 +36,8 @@ The selected display includes a connector and a pinned hardware identity. Replay
 
 Shared history uses lossless WebP originals at capture resolution. Each accepted image is stored before OCR runs. A consecutive identical image can share its original and frame record while adding another timestamped observation. A capture gap breaks that continuity.
 
+The encoder uses `method=0`, `quality=50`, `exact=1` and one encoding thread. In lossless WebP, quality controls compression effort, not image fidelity. This fast candidate keeps the original pixels and dimensions; the [synthetic effort experiment](webp-effort-experiment.md) records its size, CPU and memory tradeoffs against the previous `quality=0` setting. It affects newly encoded images; existing originals are not recompressed.
+
 This storage mode favors recoverable evidence and immediate image access. Shared recording does not use a long video stream or claim Rewind's historical compression ratios. FFmpeg/video codec paths remain available for finite experiments.
 
 ## History model

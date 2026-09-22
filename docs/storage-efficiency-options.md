@@ -1,12 +1,14 @@
 # Storage efficiency options
 
-Date: 2026-09-22. Research and proposed experiments; no compression setting, capture interval or image quality was changed for this review. No personal images were opened or recompressed.
+Date: 2026-09-22. Research and experiment decisions. The initial review left compression settings unchanged; the user subsequently approved a trial of the fast lossless candidate. No personal images were opened or recompressed for the codec experiment.
 
-Start by testing stronger **lossless WebP compression**. Then compare short lossless video chunks if sharing unchanged content between moments offers enough additional savings. Keep downsampling and lossy archives as explicit future quality choices. The five-second interval and deferred similarity work remain unchanged.
+Trial **modest extra lossless WebP effort at capture** first. Then compare short lossless video chunks if sharing unchanged content between moments offers enough additional savings. Keep downsampling and lossy archives as explicit future quality choices. The five-second interval and deferred similarity work remain unchanged.
+
+The first [WebP effort experiment](webp-effort-experiment.md) is complete. The fast candidate reduced synthetic dense text by 52–53% without a measured memory increase, but saved only 6% on a textured visual. Stronger settings saved more and cost more CPU and memory. The approved [capture trial](fast-webp-capture-trial.md) uses `method=0, quality=50` and retained every requested moment in the paired synthetic pipeline test; its value in ordinary use still needs measurement.
 
 ## Current baseline
 
-Shared recording stores native-resolution lossless WebP originals. The encoder uses `quality=0`, `method=0`, `exact=1` and one encoding thread: it favors a quick durable write. Consecutive identical images can share a frame while keeping each observation's timestamp. See [capture architecture](architecture.md#capture-and-source-storage).
+Shared recording stores native-resolution lossless WebP originals. The encoder now uses `quality=50`, `method=0`, `exact=1` and one encoding thread. The earlier `quality=0` setting remains the experiment's comparison baseline. New images use the trial setting; existing images are not rewritten. Consecutive identical images can share a frame while keeping each observation's timestamp. See [capture architecture](architecture.md#capture-and-source-storage).
 
 Rolling eviction and compression solve different problems. Eviction keeps the newest history within the chosen age and size limits. Better compression can fit more history within that same size; it does not replace bounded storage or justify stopping normal recording at the allowance.
 
@@ -14,8 +16,8 @@ Rolling eviction and compression solve different problems. Eviction keeps the ne
 
 | Approach | What it could improve | Main tradeoff |
 | --- | --- | --- |
-| Modest extra WebP effort at capture | Smaller independent files; unchanged pixels and direct access | Extra CPU on each capture; benchmark before changing the default |
-| Recompress older WebP files while idle | Preserve quick capture writes and exact visual evidence | Decode/encode work, temporary space and another disk write; savings are unmeasured |
+| Modest extra WebP effort at capture | Smaller independent files; unchanged pixels and direct access | Extra CPU on visual content; approved fast-setting trial needs ordinary-use validation |
+| Recompress older WebP files while idle | Preserve quick capture writes and exact visual evidence | Decode/encode work, temporary space and another disk write; synthetic savings do not predict real-history savings |
 | Short lossless RGB video chunks | Compress repeated content across neighboring moments | More complex seeking, crash recovery and deletion; encoder memory and CPU need measurement |
 | Full checkpoints plus changed tiles | Store unchanged pixels once without dropping moments | Custom archive dependencies; scrolling defeats simple fixed-position tile reuse |
 | Reduced-resolution or lossy older images | Potentially larger storage reduction | Irreversible loss of fine detail; original OCR may become impossible to verify or improve |
@@ -37,7 +39,7 @@ Use a durable, bounded queue and one small job at a time. Skip moments near expi
 ## Proposed benchmark
 
 1. Use an isolated synthetic corpus with terminals, dense small text, scrolling, changed digits, photographs and motion. Preserve every timestamp. Reuse the existing [pipeline comparison criteria](pipeline-efficiency-research.md#proposed-experiment-order-and-decision-criteria).
-2. Compare the current WebP settings with modest lossless effort, both directly encoded and recompressed. Measure saved bytes, CPU-seconds, peak memory, total writes and decode latency. Keep only smaller replacements and verify every decoded pixel hash.
+2. Compare the original `method=0, quality=0` baseline with modest lossless effort, both directly encoded and recompressed. The [codec experiment](webp-effort-experiment.md) covers the first synthetic comparison. Extend it to pipeline behavior: measure saved bytes, CPU-seconds, peak memory, total writes and decode latency. Keep only smaller replacements and verify every decoded pixel hash.
 3. If savings justify further work, compare short lossless RGB video chunks against the best image setting. Measure cold/random seeks and sequential OCR decode, then test interruption, restart, expiry and deletion across chunk boundaries.
 4. Select on storage saved per unit of work while preserving capture coverage, indexing delay and foreground responsiveness. Measure energy only where supported; CPU time alone is not a power measurement. Do not promise a compression ratio before this comparison.
 
