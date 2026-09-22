@@ -4,6 +4,7 @@
 #include "index_service.h"
 #include "replay_config.h"
 #include "recording_service.h"
+#include "storage_forecast.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -57,6 +58,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <exception>
 
 namespace replay {
@@ -376,9 +378,54 @@ QString chooseItem(QWidget* parent, const QString& title, const QString& prompt,
     return accepted ? dialog.textValue() : QString();
 }
 
+bool currentStorageStatus(const QJsonObject& status, const QString& directory) {
+    const QString reportedDirectory = status.value("history_directory").toString();
+    return status.value("running").toBool() && !reportedDirectory.isEmpty() &&
+        QDir(reportedDirectory).absolutePath() == QDir(directory).absolutePath() && status.value("storage_available").toBool(true);
+}
+
+QString storageCapacityText(const QJsonObject& status, const QString& directory) {
+    if (!status.value("running").toBool()) return "Storage estimate unavailable while the background service is stopped.";
+    if (!currentStorageStatus(status, directory))
+        return "Storage estimate unavailable for this history folder.";
+    const auto forecast = status.value("storage_forecast").toObject();
+    const auto usage = status.value("usage").toObject();
+    QStringList parts;
+    if (usage.contains("disk_bytes") && status.value("max_disk_mib").toDouble() > 0) {
+        parts << QString("Storage: %1 / %2 GiB used.")
+            .arg(usage.value("disk_bytes").toDouble() / (1024 * 1024 * 1024), 0, 'f', 1)
+            .arg(status.value("max_disk_mib").toDouble() / 1024, 0, 'f', 1);
+    }
+    const QString state = forecast.value("state").toString();
+    const bool freeSpace = forecast.value("limiting_factor").toString() == "free-space";
+    const double activeHours = forecast.value("capacity_active_hours").toDouble(-1);
+    if (activeHours >= 0 && std::isfinite(activeHours)) {
+        parts << QString("This allowance holds about %1 active recording hours at your recent rate.").arg(activeHours, 0, 'f', 1);
+    } else if (state == "no-growth") {
+        parts << "No recent storage growth; history capacity cannot be estimated yet.";
+    } else if (state == "insufficient-data") {
+        parts << "More recorded history is needed to estimate capacity.";
+    } else {
+        parts << "History capacity estimate is unavailable.";
+    }
+    const double calendarDays = forecast.value("capacity_calendar_days").toDouble(-1);
+    const double retentionBytes = forecast.value("estimated_retention_bytes").toDouble(-1);
+    if (calendarDays >= 0 && retentionBytes >= 0 && std::isfinite(calendarDays) && std::isfinite(retentionBytes)) {
+        parts << QString("About %1 days at your observed usage; %2 days would need roughly %3 GiB.")
+            .arg(calendarDays, 0, 'f', 1).arg(forecast.value("retention_days").toInt())
+            .arg(retentionBytes / (1024 * 1024 * 1024), 0, 'f', 1);
+    } else if (activeHours >= 0) {
+        parts << "Calendar estimates need at least seven retained days, all under the current capture settings.";
+    }
+    if (freeSpace) parts << "Available disk space reduces this capacity.";
+    parts << "Oldest history rolls off at the size or age limit; recording continues.";
+    return parts.join(' ');
+}
+
 class SettingsDialog final : public QDialog {
 public:
     explicit SettingsDialog(QWidget* parent, const QJsonObject& recordingStatus, std::function<QJsonArray()> displays) : QDialog(parent),
+        recordingStatus_(recordingStatus),
         visibleWindows_(recordingStatus.value("visible_windows").toArray()),
         compositorInstance_(recordingStatus.value("compositor_instance").toString(qEnvironmentVariable("HYPRLAND_INSTANCE_SIGNATURE"))) {
         theme(this);
@@ -409,7 +456,7 @@ public:
         days_->setObjectName("settingRetentionDays");
         days_->setRange(1, 3650); days_->setSuffix(" days");
         form->addRow("&Keep history", days_);
-        auto* retention = new QLabel("A moving window: older images, text and queued work are permanently deleted.");
+        auto* retention = new QLabel("Keep up to this age. When the disk allowance fills, the oldest images, text and queued work roll off first.");
         retention->setWordWrap(true); form->addRow(retention);
         disk_ = new QSpinBox; disk_->setObjectName("settingMaxDiskMiB");
         disk_->setRange(64, 1048576); disk_->setSuffix(" MiB");
@@ -417,6 +464,9 @@ public:
         free_ = new QSpinBox; free_->setObjectName("settingMinFreeMiB");
         free_->setRange(0, 1048576); free_->setSuffix(" MiB");
         form->addRow("Leave &free", free_);
+        capacity_ = new QLabel;
+        capacity_->setObjectName("settingsStorageCapacity"); capacity_->setWordWrap(true); capacity_->setTextFormat(Qt::PlainText);
+        form->addRow(capacity_);
         storage_ = new QLineEdit; storage_->setObjectName("settingStorageDirectory");
         storage_->setReadOnly(true); storage_->setAccessibleName("History storage folder");
         const QString viewedHistory = parent->property("historyDirectory").toString();
@@ -599,6 +649,14 @@ public:
             error_->setText(QString::fromUtf8(error.what()) + "\nCorrect config.toml and reopen Settings. Existing settings have not been changed.");
             buttons_->button(QDialogButtonBox::Save)->setEnabled(false);
         }
+        const auto updateCapacity = [this] { updateStorageCapacity(); };
+        connect(storage_, &QLineEdit::textChanged, this, updateCapacity);
+        connect(disk_, &QSpinBox::valueChanged, this, updateCapacity);
+        connect(free_, &QSpinBox::valueChanged, this, updateCapacity);
+        connect(days_, &QSpinBox::valueChanged, this, updateCapacity);
+        connect(interval_, &QDoubleSpinBox::valueChanged, this, updateCapacity);
+        connect(output_, &QComboBox::currentIndexChanged, this, updateCapacity);
+        updateStorageCapacity();
         connect(&writer_, &QFutureWatcher<QString>::finished, this, [this] {
             const QString error = writer_.result();
             if (error.isEmpty()) accept();
@@ -630,6 +688,32 @@ public:
 protected:
     void reject() override { if (!writer_.isRunning()) QDialog::reject(); }
 private:
+    void updateStorageCapacity() {
+        const auto& saved = document_.config;
+        const bool differentCapture = QDir(storage_->text()).absolutePath() != QDir(replayHistoryDirectory(saved)).absolutePath() ||
+            interval_->value() != saved.intervalSeconds || output_->currentData().toString() != saved.output;
+        const bool unappliedCapture = recordingStatus_.value("running").toBool() &&
+            ((recordingStatus_.contains("interval_seconds") && recordingStatus_.value("interval_seconds").toDouble() != saved.intervalSeconds) ||
+             (recordingStatus_.contains("output") && recordingStatus_.value("output").toString() != saved.output));
+        if (differentCapture || unappliedCapture) {
+            capacity_->setText("The new folder, display or capture interval needs its own usage estimate. Oldest history rolls off at the size or age limit.");
+            capacity_->setToolTip({});
+            return;
+        }
+        auto shown = recordingStatus_;
+        const auto measured = shown.value("storage_forecast").toObject();
+        StorageForecastOptions options;
+        options.diskBytes = measured.value("disk_bytes").toInteger(shown.value("usage").toObject().value("disk_bytes").toInteger());
+        options.maxDiskBytes = qint64(disk_->value()) * 1024 * 1024;
+        options.freeBytes = measured.value("filesystem_free_bytes").toInteger(-1);
+        options.minFreeBytes = qint64(free_->value()) * 1024 * 1024;
+        options.retentionDays = days_->value();
+        shown["storage_forecast"] = storageCapacityProjection(measured, options);
+        shown["max_disk_mib"] = disk_->value();
+        capacity_->setText(storageCapacityText(shown, replayHistoryDirectory(saved)));
+        capacity_->setToolTip(!currentStorageStatus(shown, replayHistoryDirectory(saved)) ? QString()
+            : measured.value("estimate_note").toString());
+    }
     void copyAgentPrompt(AgentPromptTopic topic) {
         auto shown = document_.config;
         shown.intervalSeconds = interval_->value();
@@ -672,9 +756,17 @@ private:
         }
         try { validateReplayConfig(config); }
         catch (const std::exception& error) { error_->setText(QString::fromUtf8(error.what())); return; }
-        if (config.retentionDays < document_.config.retentionDays) {
-            QMessageBox confirmation(QMessageBox::NoIcon, "Shorten history retention?",
-                QString("Saving will permanently delete images, recognized text and queued work older than %1 days from your history. This cannot be undone.").arg(config.retentionDays),
+        QStringList deletionChanges;
+        if (config.retentionDays < document_.config.retentionDays)
+            deletionChanges << QString("history older than %1 days").arg(config.retentionDays);
+        if (config.maxDiskMiB < document_.config.maxDiskMiB)
+            deletionChanges << QString("oldest history to fit the %1 MiB allowance").arg(config.maxDiskMiB);
+        if (config.minFreeMiB > document_.config.minFreeMiB)
+            deletionChanges << QString("oldest history if needed to leave %1 MiB free").arg(config.minFreeMiB);
+        if (!deletionChanges.isEmpty()) {
+            QMessageBox confirmation(QMessageBox::NoIcon, "Keep less history?",
+                QString("Saving can permanently delete %1, including images, recognized text and queued work. This cannot be undone.")
+                    .arg(deletionChanges.join("; ")),
                 QMessageBox::Save | QMessageBox::Cancel, this);
             confirmation.setObjectName("confirmShorterRetention");
             theme(&confirmation);
@@ -698,12 +790,13 @@ private:
         }));
     }
     ReplayConfigDocument document_;
+    QJsonObject recordingStatus_;
     QComboBox* output_ = nullptr;
     QLineEdit* storage_ = nullptr;
     QString storageDirectory_;
     bool displayChosen_ = false;
     bool configEditable_ = false;
-    QLabel *displayNote_ = nullptr, *promptNotice_ = nullptr;
+    QLabel *displayNote_ = nullptr, *promptNotice_ = nullptr, *capacity_ = nullptr;
     QDoubleSpinBox* interval_ = nullptr;
     QSpinBox *days_ = nullptr, *disk_ = nullptr, *free_ = nullptr, *idle_ = nullptr;
     QCheckBox* login_ = nullptr;
@@ -801,6 +894,9 @@ public:
         recordingState_ = new QLabel;
         recordingState_->setObjectName("recordingStatus"); recordingState_->setWordWrap(true); recordingState_->setTextFormat(Qt::PlainText);
         recordingLayout->addWidget(recordingState_);
+        storageCapacity_ = new QLabel;
+        storageCapacity_->setObjectName("recordingStorageCapacity"); storageCapacity_->setWordWrap(true); storageCapacity_->setTextFormat(Qt::PlainText);
+        recordingLayout->addWidget(storageCapacity_);
         recordingPanel_->setVisible(sharedHistory_);
         detailLayout->addWidget(recordingPanel_);
         connect(recordingAction_, &QPushButton::clicked, this, [this] { requestRecording(recordingAction_->property("action").toString()); });
@@ -1228,7 +1324,8 @@ private:
         const QMap<QString, QString> states{{"offline", "Recording is stopped."}, {"stopped", "Recording is stopped."},
             {"recording", "Recording"}, {"paused", "Recording is paused."}, {"locked", "Paused while the screen is locked."},
             {"sleeping", "Paused while the computer sleeps."}, {"output-unavailable", "Waiting for your selected display."},
-            {"excluded", "Paused while an excluded window is visible."}, {"storage-full", "Recording paused: storage limit reached."},
+            {"excluded", "Paused while an excluded window is visible."}, {"storage-cleanup", "Rolling out oldest history to make room."},
+            {"storage-full", "Recording paused: storage could not be reclaimed."},
             {"excluded_window", "Paused while an excluded window is visible."},
             {"output_unavailable", "Waiting for your selected display."}, {"output_off", "Waiting for your selected display."},
             {"output_identity_changed", "The selected display has changed. Review Settings."},
@@ -1242,6 +1339,9 @@ private:
         for (const auto& value : {recording_.value("reason").toString(), recording_.value("config_error").toString(), recording_.value("storage_error").toString(), recordingMessage_})
             if (!value.isEmpty()) message << value;
         recordingState_->setText(message.join(' '));
+        storageCapacity_->setText(storageCapacityText(recording_, directory_));
+        storageCapacity_->setToolTip(currentStorageStatus(recording_, directory_)
+            ? recording_.value("storage_forecast").toObject().value("estimate_note").toString() : QString());
         setProperty("recordingState", state);
     }
 
@@ -1924,6 +2024,7 @@ private:
     QWidget* recordingPanel_ = nullptr;
     QPushButton *recordingAction_ = nullptr, *recordingStop_ = nullptr, *deleteRecent_ = nullptr;
     QLabel* recordingState_ = nullptr;
+    QLabel* storageCapacity_ = nullptr;
     QFutureWatcher<ServiceControlResult> recordingRequest_;
     std::shared_ptr<std::atomic_bool> closing_ = std::make_shared<std::atomic_bool>(false);
     QString completedQuery_;

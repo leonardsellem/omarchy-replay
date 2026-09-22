@@ -177,8 +177,14 @@ QJsonObject recordingServiceStatus() {
 }
 
 QJsonObject controlRecordingService(const QString &action, const QJsonObject &arguments) {
-    const QStringList allowed{"start", "pause", "resume", "stop", "shutdown", "index-pause", "index-resume", "reload", "delete-recent"};
+    const QStringList allowed{"start", "pause", "resume", "stop", "shutdown", "index-pause", "index-resume", "reload", "delete-recent",
+                              "debug-start", "debug-status", "debug-stop"};
     if (!allowed.contains(action)) throw std::runtime_error("Unknown recording control");
+    if (action.startsWith("debug-")) {
+        const auto result = request(action, arguments);
+        if (result.isEmpty()) fail("Debugging requires an already running Replay coordinator; recording was not started");
+        return result;
+    }
     QElapsedTimer deadline; deadline.start();
     while (true) {
         // Only a failed connection is safe to retry. A request that was sent but

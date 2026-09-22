@@ -1165,6 +1165,7 @@ struct Recorder::Impl : OcrEngine {
         if (options.archiveFirst && (!options.deferredOcr || !options.ocr || options.codec != "webp"))
             error("Archive-first retention requires deferred OCR and the lossless WebP codec");
         if (options.resume && !options.archiveFirst) error("Persistent capture requires archive-first WebP history");
+        if (options.rollingStorage && !options.resume) error("Rolling storage requires persistent history");
         if (options.deferredOcr && (!options.ocr || options.maxPendingFrames < 0 || options.maxPendingFrames > 1024 ||
             options.maxPendingBytes < 1 || (!options.archiveFirst && options.maxPendingBytes >= options.maxDiskBytes - IndexReserve - MiB)))
             error("Deferred OCR requires OCR enabled and pending limits that leave space for archive and index");
@@ -1246,7 +1247,9 @@ struct Recorder::Impl : OcrEngine {
             collectRetiredMedia(*db, options.directory, 128, recovered);
         }
         if (options.ocr && !options.deferredOcr) initializeOcr();
-        checkDisk();
+        // Opening history, including stopped/paused initialization, must not
+        // evict observations. Rolling admission happens only for a new image.
+        if (!options.rollingStorage) checkDisk();
     }
 
     ~Impl() {
@@ -1271,6 +1274,18 @@ struct Recorder::Impl : OcrEngine {
             quint64(disk.bytesAvailable()) < options.minFreeBytes ||
             quint64(disk.bytesAvailable()) - options.minFreeBytes < additionalBytes)
             error("Recording stopped: minimum free-disk reserve reached; retained data was preserved");
+    }
+
+    void admitDisk(quint64 additionalBytes) {
+        if (options.rollingStorage) {
+            // The common path uses the recorder's existing connection. Only a
+            // capacity boundary opens a maintenance connection or scans rows.
+            try { checkDisk(additionalBytes); return; }
+            catch (const std::runtime_error &) {}
+            const auto space = makeHistorySpace(options.directory, options.maxDiskBytes, options.minFreeBytes, additionalBytes);
+            if (!space.ready) throw RollingStorageUnavailable(space.reason, space.more);
+        }
+        checkDisk(additionalBytes);
     }
 
     void drainErrors() {
@@ -1449,7 +1464,9 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
         if (timestampMs < 0 || timestampMs < d->previousTimestamp) error("Capture timestamps must be nondecreasing");
         if (d->options.codec != "webp" && ((input.width() % 2) || (input.height() % 2)))
             error("Video comparison requires even frame dimensions");
-        d->checkDisk(IndexReserve);
+        // A rolling archive must know the real encoded size before retiring
+        // evidence; an oversized incoming image must leave history intact.
+        if (!d->options.rollingStorage) d->checkDisk(IndexReserve);
         QElapsedTimer timer; timer.start(); double cpuStart = cpuMs();
         const QImage image = input.convertToFormat(QImage::Format_RGBA8888);
         const ImageFingerprint currentFingerprint = fingerprint(image, d->ocr && d->options.ocrMode == "incremental",
@@ -1462,8 +1479,20 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
             d->mediaWallMs += timer.nsecsElapsed() / 1e6; d->mediaCpuMs += cpuMs() - cpuStart;
         }
         AddFrameResult result;
+        QByteArray original;
         timer.restart(); cpuStart = cpuMs();
         if (currentFingerprint.digest == d->lastCaptureFingerprint.digest) {
+            if (d->options.rollingStorage) {
+                try { d->checkDisk(IndexReserve); }
+                catch (const std::runtime_error &) {
+                    original = encodeWebP(image);
+                    d->stagingEncodeWallMs += timer.nsecsElapsed() / 1e6;
+                    d->stagingEncodeCpuMs += cpuMs() - cpuStart;
+                    // Cleanup can retire the shared frame; reserve enough to
+                    // publish it anew before touching any existing observation.
+                    d->admitDisk(original.size() + IndexReserve);
+                }
+            }
             d->db->exec("BEGIN IMMEDIATE");
             Statement query(*d->db, "UPDATE frames SET last_timestamp_ms=?,observation_count=observation_count+1 WHERE id=?");
             query.bind(1, timestampMs); query.bind(2, d->lastFrameId); query.next();
@@ -1479,20 +1508,21 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
             return result;
             }
         }
-        QByteArray original;
         if (d->options.deferredOcr) {
             if (!d->options.archiveFirst && !d->queueHasRoom(0)) {
                 d->finishSegment(); // A full queue must not wait for a larger segment limit.
                 if (!d->queueHasRoom(0)) { result.backlogFull = true; d->countBacklogRejection(); return result; }
             }
-            timer.restart(); cpuStart = cpuMs();
-            original = encodeWebP(image);
-            d->stagingEncodeWallMs += timer.nsecsElapsed() / 1e6; d->stagingEncodeCpuMs += cpuMs() - cpuStart;
+            if (original.isEmpty()) {
+                timer.restart(); cpuStart = cpuMs();
+                original = encodeWebP(image);
+                d->stagingEncodeWallMs += timer.nsecsElapsed() / 1e6; d->stagingEncodeCpuMs += cpuMs() - cpuStart;
+            }
             if (!d->options.archiveFirst && !d->queueHasRoom(original.size())) {
                 d->finishSegment();
                 if (!d->queueHasRoom(original.size())) { result.backlogFull = true; d->countBacklogRejection(); return result; }
             }
-            d->checkDisk(original.size() + IndexReserve);
+            d->admitDisk(original.size() + IndexReserve);
         }
         QString text;
         QString geometry;
@@ -1583,6 +1613,10 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
         d->checkDisk();
         result.stored = true; result.frameId = d->lastFrameId;
         return result;
+    } catch (const RollingStorageUnavailable &) {
+        // Admission runs before any publication transaction. A bounded cleanup
+        // can continue on the next tick without poisoning the recorder.
+        throw;
     } catch (const OcrCancelled &) {
         // OCR precedes this observation's media/index write. Earlier accepted
         // frames remain intact and the caller may finalize their video segment.
@@ -2226,6 +2260,12 @@ HistoryMaintenanceResult removeHistoryObservations(const QString &requestedDirec
             "EXISTS(SELECT 1 FROM history_gaps WHERE start_ms<? AND end_ms>?) OR EXISTS(SELECT 1 FROM history_media WHERE state='retired')");
         remaining.bind(1, from); remaining.bind(2, until); remaining.bind(3, until); remaining.bind(4, from);
         remaining.next(); result.more = remaining.number(0) != 0;
+        if (!result.more) {
+            Statement vacuum(db, "PRAGMA auto_vacuum"); vacuum.next();
+            if (vacuum.number(0) == 2) {
+                Statement pages(db, "PRAGMA freelist_count"); pages.next(); result.more = pages.number(0) > 0;
+            }
+        }
     } catch (const SqliteError &exception) {
         if (!sqlite3_get_autocommit(db.handle)) db.exec("ROLLBACK");
         if (!exception.contention()) throw;
@@ -2243,6 +2283,138 @@ HistoryMaintenanceResult maintainHistory(const QString &directory, qint64 expire
 HistoryMaintenanceResult deleteHistoryRange(const QString &directory, qint64 fromInclusiveMs, qint64 toExclusiveMs,
                                            int maxObservations, int maxFiles) {
     return removeHistoryObservations(directory, fromInclusiveMs, toExclusiveMs, maxObservations, maxFiles);
+}
+
+HistorySpaceResult makeHistorySpace(const QString &requestedDirectory, quint64 maxDiskBytes,
+                                   quint64 minFreeBytes, quint64 additionalBytes,
+                                   int maxObservations, int maxFiles) {
+    if (maxDiskBytes < 16 * MiB || maxObservations < 1 || maxObservations > 10000 || maxFiles < 1 || maxFiles > 1024)
+        error("Invalid rolling history limits");
+    HistorySpaceResult result;
+    // An oversized observation must not erase history in a futile attempt to
+    // fit. The caller includes the bounded OCR/index publication reserve.
+    if (additionalBytes >= maxDiskBytes || additionalBytes > quint64(std::numeric_limits<qint64>::max()) - minFreeBytes) {
+        result.reason = "A new moment cannot fit within the storage allowance. Increase the allowance to resume recording.";
+        return result;
+    }
+    const QString directory = privateHistoryDirectory(requestedDirectory);
+    Database db(dbPath(directory), false, true);
+    sqlite3_busy_timeout(db.handle, 100);
+    requireHistory(db);
+    QStorageInfo disk(directory);
+    auto available = [&]() -> qint64 {
+        disk.refresh();
+        return disk.isValid() && disk.isReady() && !disk.isReadOnly() ? disk.bytesAvailable() : -1;
+    };
+    auto fits = [&](quint64 used, qint64 free) {
+        return free >= 0 && used < maxDiskBytes && additionalBytes <= maxDiskBytes - used &&
+            quint64(free) >= minFreeBytes && additionalBytes <= quint64(free) - minFreeBytes;
+    };
+    try {
+        auto used = historyDiskBytes(db, directory);
+        const auto initialBytes = used;
+        auto free = available();
+        if (fits(used, free)) { result.ready = true; return result; }
+        if (free < 0) { result.reason = "The history disk is unavailable or read-only. Recording will resume when it is available."; return result; }
+
+        // Finish interrupted retirements before choosing any more observations.
+        // This also reclaims reserved originals left by a prior crashed writer.
+        result.maintenance = removeHistoryObservations(directory, 0, 0, maxObservations, maxFiles);
+        if (result.maintenance.busy) {
+            result.more = true; result.reason = "Waiting for the history database before rolling out older moments."; return result;
+        }
+        {
+            // A passive checkpoint does not shrink the physical WAL file. Only
+            // do this at a capacity boundary, with the same bounded busy wait.
+            Statement checkpoint(db, "PRAGMA wal_checkpoint(TRUNCATE)");
+            if (checkpoint.next() && checkpoint.number(0) != 0) {
+                result.more = true; result.reason = "Waiting for history readers before reclaiming the index journal."; return result;
+            }
+        }
+        used = historyDiskBytes(db, directory); free = available();
+        if (fits(used, free)) { result.ready = true; return result; }
+        if (free < 0) { result.reason = "The history disk is unavailable or read-only. Recording will resume when it is available."; return result; }
+
+        const quint64 owned = metadataNumber(db, "history_media_bytes");
+        const quint64 fixedBytes = used > owned ? used - owned : 0;
+        bool shrinkable = false;
+        qint64 unusedPages = 0;
+        { Statement vacuum(db, "PRAGMA auto_vacuum"); vacuum.next(); shrinkable = vacuum.number(0) == 2; }
+        if (shrinkable) { Statement pages(db, "PRAGMA freelist_count"); pages.next(); unusedPages = pages.number(0); }
+        const bool indexPressure = fixedBytes >= maxDiskBytes || additionalBytes > maxDiskBytes - fixedBytes;
+        if (!shrinkable && indexPressure) {
+            result.reason = "This older history index cannot shrink incrementally to this allowance. Increase the allowance; compacting its index requires separate maintenance.";
+            return result;
+        }
+        // Existing free pages should be reclaimed before evicting more rows.
+        // The service's bounded maintenance batches can continue this between
+        // capture intervals without repeatedly capturing/encoding screenshots.
+        if (unusedPages > 0) {
+            result.more = used < initialBytes;
+            result.reason = result.more ? "Reclaiming unused history index pages before recording continues."
+                                        : "The history index could not release its unused pages. Check the history disk.";
+            return result;
+        }
+        if (result.maintenance.filesRemoved >= maxFiles) {
+            result.more = true; result.reason = "Continuing bounded cleanup of older history files.";
+            return result;
+        }
+        const quint64 recoverableIndex = shrinkable && fixedBytes > 64 * 1024 ? fixedBytes - 64 * 1024 : 0;
+        if (quint64(free) < minFreeBytes + additionalBytes && owned + recoverableIndex < minFreeBytes + additionalBytes - quint64(free)) {
+            result.reason = "Replay cannot recover the free-disk reserve from its own history. Free disk space or lower the reserve to resume recording.";
+            return result;
+        }
+
+        // Reclaim a little beyond the next image to amortize cleanup, bounded to
+        // 1% of the allowance or 32 MiB. Never discard a large arbitrary batch.
+        const quint64 headroom = std::min(maxDiskBytes / 100, 32 * MiB);
+        const quint64 indexFloor = shrinkable ? std::min(fixedBytes, quint64(64 * 1024)) : fixedBytes;
+        const quint64 targetAdditional = std::min(additionalBytes + headroom, maxDiskBytes - indexFloor);
+        const quint64 allowanceNeed = used > maxDiskBytes - targetAdditional ? used - (maxDiskBytes - targetAdditional) : 0;
+        const quint64 freeNeed = quint64(free) < minFreeBytes + targetAdditional ? minFreeBytes + targetAdditional - quint64(free) : 0;
+        const quint64 needed = std::max(allowanceNeed, freeNeed);
+        quint64 estimated = 0;
+        int observations = 0;
+        qint64 lastTimestamp = 0;
+        QHash<qint64, qint64> counts;
+        {
+            Statement oldest(db, "SELECT o.timestamp_ms,o.frame_id,f.observation_count,m.bytes FROM observations o "
+                "JOIN frames f ON f.id=o.frame_id JOIN history_media m ON m.path=f.path "
+                "ORDER BY o.timestamp_ms,o.id LIMIT ?");
+            oldest.bind(1, maxObservations);
+            while (oldest.next()) {
+                ++observations; lastTimestamp = oldest.number(0);
+                if (++counts[oldest.number(1)] == oldest.number(2)) {
+                    estimated += quint64(oldest.number(3));
+                    if (indexPressure) break; // Release one frame's text pages, then reassess.
+                }
+                if (estimated >= needed) break;
+            }
+        }
+        if (observations > 0) {
+            const auto removed = removeHistoryObservations(directory, 0,
+                lastTimestamp == std::numeric_limits<qint64>::max() ? lastTimestamp : lastTimestamp + 1, observations,
+                maxFiles - int(result.maintenance.filesRemoved));
+            result.maintenance.observationsRemoved += removed.observationsRemoved;
+            result.maintenance.framesRemoved += removed.framesRemoved;
+            result.maintenance.filesRemoved += removed.filesRemoved;
+            result.maintenance.gapsRemoved += removed.gapsRemoved;
+            result.maintenance.bytesReclaimed += removed.bytesReclaimed;
+            result.maintenance.busy = removed.busy;
+            result.maintenance.more = removed.more;
+        }
+        result.maintenance.diskBytes = historyDiskBytes(db, directory);
+        result.ready = fits(result.maintenance.diskBytes, available());
+        result.more = !result.ready && (result.maintenance.busy || result.maintenance.observationsRemoved > 0 ||
+                                      result.maintenance.filesRemoved > 0 || result.maintenance.diskBytes < initialBytes);
+        result.reason = result.ready ? QString() : result.more
+            ? "Rolling out older moments to make room for new recording."
+            : "Replay could not safely reclaim enough storage. Check the history disk or increase the allowance.";
+    } catch (const SqliteError &exception) {
+        if (!exception.contention()) throw;
+        result.more = true; result.reason = "Waiting for the history database before rolling out older moments.";
+    }
+    return result;
 }
 
 QJsonObject historyUsage(const QString &requestedDirectory) {

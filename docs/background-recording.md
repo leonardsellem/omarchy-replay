@@ -55,15 +55,17 @@ Saving a folder change requires a review. Switching does not copy, merge or dele
 
 The retention window moves forward with time. Maintenance removes expired observations and OCR, then removes originals that have no surviving references. Repeated observations can share an image. Cleanup runs in bounded batches, so disk reclamation may take several passes.
 
-Disk allowance, free-space reserve and retention age are independent. An OCR backlog does not reject new captures. Reaching a disk limit pauses recording instead of silently shortening the retention window. Expiration, reviewed deletion, freeing space or raising the allowance can make capture eligible again.
+Replay keeps the newest history that fits the disk allowance and removes anything older than the retention age. When new moments need room, it deletes the oldest observations and their unneeded images, OCR text and queued work. The free-space reserve can require earlier cleanup. Recording continues after room is made; it waits only when cleanup is still working or safe reclamation cannot make enough space. An OCR backlog does not reject new captures.
 
-Settings asks for confirmation before shortening retention. Direct TOML edits apply without that dialog. **Delete recent…** has a separate confirmation. Neither operation promises forensic erasure from backups, filesystem snapshots or SSD media.
+Settings reviews changes that shorten retention, reduce the disk allowance or increase the free-space reserve, because they can delete older history. Routine rollover needs no confirmation. Direct TOML edits apply without that dialog. **Delete recent…** has a separate confirmation. Neither operation promises forensic erasure from backups, filesystem snapshots or SSD media.
 
 ## Resources
 
 The defaults allow OCR **40% of one CPU core** during activity, **50%** after 60 seconds idle or for requested work, and **10%** under sustained contention. A separate **60% whole-worker ceiling** is requested and verified when the host supports it. The panel distinguishes the requested value from actual enforcement.
 
 These values balance foreground work and indexing delay. Display resolution, changing pixels, text layout and CPU speed all affect throughput. Start with the defaults. If lag keeps growing or the desktop feels slower, use **Copy resources prompt** to have your agent inspect local status and make a measured adjustment. See [CPU scheduling](architecture.md#cpu-scheduling) for the policy and its limits.
+
+The **I** panel and Recording Settings show current usage and the approximate active recording hours that the whole allowance can hold. Changing the size previews capacity before saving. After retained history spans at least seven calendar days, Replay can also estimate days of history and the space needed for the chosen age window. A small allowance may never retain a full week; the active-hours estimate still works. Estimates use observed usage, with no assumed workday length. Changing the display, capture interval or folder starts a fresh usage sample. The active-hours estimate returns after five recorded minutes. Calendar estimates also wait for older observations to leave the archive.
 
 ## Exclusions
 

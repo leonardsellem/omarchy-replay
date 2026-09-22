@@ -46,6 +46,8 @@ def main():
         first = call('status')
         assert first['intent'] == 'stopped' and first['running'] is False
         assert not state.parent.exists() and not runtime.exists(), 'status created service files'
+        assert 'already running' in call('debug', success=False)
+        assert not state.parent.exists() and not runtime.exists(), 'debug started the offline recorder'
         original = dict(intent='running', indexing_paused=True, last_retained_ms=123456,
                         deletion={'from': 10, 'until': 20}, future_field={'keep': True})
         save(original)

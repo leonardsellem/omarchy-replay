@@ -5,6 +5,7 @@
 #include "capture.h"
 #include "fixture.h"
 #include "index_service.h"
+#include "storage_forecast.h"
 
 #include <QCoreApplication>
 #include <QCommandLineParser>
@@ -81,7 +82,7 @@ struct Lease {
 };
 RecorderOptions recordingOptions(const ReplayPaths &paths, const ReplayConfig &config) {
     RecorderOptions options;
-    options.directory = paths.historyDirectory; options.resume = true;
+    options.directory = paths.historyDirectory; options.resume = true; options.rollingStorage = true;
     options.archiveFirst = true; options.deferredOcr = true; options.codec = "webp";
     options.intervalSeconds = config.intervalSeconds; options.ocrMode = "incremental";
     options.maxDiskBytes = quint64(config.maxDiskMiB) * MiB;
@@ -149,23 +150,50 @@ public:
     std::unique_ptr<RecordingEnvironment> environment;
     std::unique_ptr<IndexStatusReader> indexReader;
     QProcess indexWorker;
-    QJsonObject progress, usage, workerReceipt, deletion;
+    QJsonObject progress, usage, workerReceipt, deletion, storageForecastResult;
     EnvironmentSnapshot desktop;
     QString intent = "stopped", state = "stopped", reason = "Recording is stopped.", configError, indexError;
     QString maskToken, maskInstance, captureInstance, captureDisplay;
     quint64 maskConfigGeneration = 0;
     QByteArray indexOutput, indexErrors;
     bool indexingPaused = false, shuttingDown = false, synthetic = false, workerStarted = false;
-    bool storageBlocked = false, tickActive = false, historyReady = false;
+    bool tickActive = false, historyReady = false;
     QString storageError;
     qint64 nextStorageCheck = 0;
-    qint64 blockedDiskBytes = 0, blockedFreeBytes = 0;
     qint64 nextCapture = 0, nextMaintenance = 0, nextConfig = 0, nextIndexPoll = 0, retryIndexAfter = 0;
     qint64 indexLastWork = 0, previousReady = 0, nextDesktopStatus = 0;
     quint64 controlRevision = 0;
     qint64 gapStart = 0, lastRetained = 0, retainedThisRun = 0, attempts = 0;
     QString gapReason;
     qint64 configModified = -1, configSize = -1;
+    qint64 nextForecast = 0;
+    qint64 forecastSampleAfter = 0;
+    int captureRetryCount = 0;
+    qint64 debugUntil = 0, debugStarted = 0, debugStartedWall = 0, debugAttempts = 0, debugRetained = 0;
+    QJsonObject lastDebug{{"active", false}};
+
+    QJsonObject currentDebug() const {
+        return {{"active", debugUntil > 0}, {"started_at_ms", debugStartedWall},
+            {"elapsed_ms", std::max<qint64>(0, std::min(monotonicMs(), debugUntil) - debugStarted)},
+            {"capture_attempts", attempts - debugAttempts}, {"retained_moments", retainedThisRun - debugRetained},
+            {"environment", environment ? environment->diagnostics() : QJsonObject{}}};
+    }
+    void stopDebug() {
+        if (!debugUntil) return;
+        lastDebug = currentDebug(); lastDebug["active"] = false;
+        debugUntil = 0;
+        if (environment) {
+            environment->setDiagnosticsEnabled(false);
+            lastDebug["environment"] = environment->diagnostics();
+        }
+    }
+    void expireDebug() { if (debugUntil && monotonicMs() >= debugUntil) stopDebug(); }
+    QJsonObject debugStatus() { expireDebug(); return debugUntil ? currentDebug() : lastDebug; }
+
+    QJsonObject forecastCaptureSettings() const {
+        return {{"directory", paths.historyDirectory}, {"output", document.config.output},
+            {"output_identity", document.config.outputIdentity}, {"interval_seconds", document.config.intervalSeconds}};
+    }
 
     explicit Coordinator(bool test, const QString &syntheticEnvironment) : synthetic(test) {
         privateDirectory(paths.stateDirectory); privateDirectory(paths.runtimeDirectory);
@@ -178,6 +206,9 @@ public:
         }
         paths.historyDirectory = replayHistoryDirectory(document.config);
         const auto saved = readJson(paths.stateDirectory + "/recording.json");
+        forecastSampleAfter = std::clamp<qint64>(saved.value("forecast_sample_after_ms").toInteger(), 0, now());
+        const auto previousCapture = saved.value("forecast_capture").toObject();
+        if (!previousCapture.isEmpty() && previousCapture != forecastCaptureSettings()) forecastSampleAfter = now();
         intent = saved.value("intent").toString("stopped");
         if (intent != "running" && intent != "paused" && intent != "stopped") fail("Invalid saved recording intent");
         indexingPaused = saved.value("indexing_paused").toBool(); deletion = saved.value("deletion").toObject();
@@ -192,7 +223,7 @@ public:
         prepareHistory();
         if (!synthetic) { environment = std::make_unique<RecordingEnvironment>(); environment->configure(environmentOptions(document.config)); }
         else if (!syntheticEnvironment.isEmpty()) {
-            environment = std::make_unique<RecordingEnvironment>([syntheticEnvironment] {
+            environment = std::make_unique<RecordingEnvironment>([syntheticEnvironment, reads = quint64(0)]() mutable {
                 EnvironmentObservation observed;
                 const auto input = readJson(syntheticEnvironment);
                 if (!input.value("known").toBool()) return observed;
@@ -201,6 +232,7 @@ public:
                 observed.compositorLocked = observed.sessionLocked = input.value("locked").toBool();
                 observed.sleeping = input.value("sleeping").toBool(); observed.configError = false;
                 observed.compositorInstance = "synthetic-session"; observed.eventGeneration = input.value("generation").toInteger();
+                if (input.value("unstable").toBool()) observed.eventGeneration = ++reads;
                 observed.monitors = input.value("monitors").toArray(); observed.windows = input.value("windows").toArray();
                 observed.exclusionsVerified = true;
                 return observed;
@@ -209,6 +241,7 @@ public:
             environment->configure(options);
         }
         if (historyReady && lastRetained > 0 && now() > lastRetained) recordGap(paths.historyDirectory, lastRetained, now(), "coordinator-restart");
+        saveIntent();
         log("Recording coordinator started.");
     }
     ~Coordinator() { stopIndex(); closeCapture(); }
@@ -249,6 +282,7 @@ public:
     void loseStorage(const QString &error) {
         stopIndex(); closeCapture(); indexReader.reset(); historyReady = false;
         progress = {}; usage = {}; storageError = error.left(500);
+        storageForecastResult = {}; nextForecast = 0;
         gapStart = 0; gapReason.clear();
         transition("storage-unavailable", storageError);
     }
@@ -273,7 +307,8 @@ public:
     }
     void saveIntent() {
         writeJson(paths.stateDirectory + "/recording.json", {{"intent", intent}, {"indexing_paused", indexingPaused},
-            {"last_retained_ms", lastRetained}, {"deletion", deletion}});
+            {"last_retained_ms", lastRetained}, {"deletion", deletion},
+            {"forecast_capture", forecastCaptureSettings()}, {"forecast_sample_after_ms", forecastSampleAfter}});
     }
     void closeCapture() {
         capture.reset();
@@ -365,6 +400,8 @@ public:
                 }
             }
             const bool changedHistory = replayHistoryDirectory(next.config) != paths.historyDirectory;
+            const bool changedCapture = changedHistory || next.config.output != document.config.output ||
+                next.config.outputIdentity != document.config.outputIdentity || next.config.intervalSeconds != document.config.intervalSeconds;
             if (changedHistory && !deletion.isEmpty()) fail("Wait for the current history deletion before changing its folder");
             rememberConfig(next.original);
             stopIndex(); closeCapture();
@@ -376,14 +413,16 @@ public:
                 previousReady = 0; nextIndexPoll = 0; nextStorageCheck = 0;
                 prepareHistory();
             }
+            if (changedCapture) forecastSampleAfter = now();
+            saveIntent();
             ++controlRevision;
-            storageBlocked = false;
             maskToken.clear();
             if (environment) {
                 auto options = environmentOptions(document.config); if (synthetic) options.exclusionMaskToken = QString(64, 'a');
                 environment->configure(options);
             }
-            nextMaintenance = 0; nextCapture = 0; configError.clear();
+            nextMaintenance = 0; nextCapture = 0; nextForecast = 0; storageForecastResult = {};
+            captureRetryCount = 0; configError.clear();
             log("Validated recording settings reloaded.");
         } catch (const std::exception &error) { configError = QString::fromUtf8(error.what()).left(500); }
     }
@@ -399,10 +438,18 @@ public:
             nextMaintenance = result.more ? time + 100 : time + 10000;
         }
         usage = historyUsage(paths.historyDirectory);
-        if (storageBlocked) {
+        if (time >= nextForecast) {
             QStorageInfo disk(paths.historyDirectory); disk.refresh();
-            if (usage.value("disk_bytes").toInteger() < blockedDiskBytes || disk.bytesAvailable() > blockedFreeBytes + MiB)
-                storageBlocked = false;
+            StorageForecastOptions options;
+            options.nowMs = now(); options.intervalSeconds = document.config.intervalSeconds;
+            options.sampleAfterMs = forecastSampleAfter;
+            options.retentionDays = document.config.retentionDays;
+            options.diskBytes = usage.value("disk_bytes").toInteger();
+            options.maxDiskBytes = document.config.maxDiskMiB * MiB;
+            options.freeBytes = disk.isValid() && disk.isReady() ? disk.bytesAvailable() : -1;
+            options.minFreeBytes = document.config.minFreeMiB * MiB;
+            storageForecastResult = storageForecast(paths.historyDirectory, options);
+            nextForecast = time + 60000;
         }
     }
     QJsonObject status() {
@@ -415,6 +462,7 @@ public:
         QJsonObject result{{"available", true}, {"running", true}, {"pid", qint64(getpid())}, {"intent", intent},
             {"state", state}, {"reason", reason}, {"config_error", configError}, {"output", c.output},
             {"progress", progress}, {"usage", usage}, {"retention_days", c.retentionDays}, {"max_disk_mib", c.maxDiskMiB},
+            {"min_free_mib", c.minFreeMiB}, {"interval_seconds", c.intervalSeconds},
             {"login_startup", c.loginStartup}, {"indexing_paused", indexingPaused}, {"index_error", indexError},
             {"indexing", indexWorker.state() != QProcess::NotRunning}, {"index_controller_pid", qint64(indexWorker.processId())},
             {"visible_windows", desktop.visibleWindows}, {"excluded_apps", QJsonArray::fromStringList(desktop.excludedApps)},
@@ -429,6 +477,7 @@ public:
         if (indexWorker.state() != QProcess::NotRunning)
             result["worker_policy"] = ownedIndexWorkerPolicy(paths.historyDirectory, indexWorker.processId());
         else if (!workerReceipt.isEmpty()) result["worker_resources"] = workerReceipt.value("resources");
+        result["storage_forecast"] = storageForecastResult;
         return result;
     }
     void applyExclusions() {
@@ -467,10 +516,22 @@ public:
     QJsonObject control(const QJsonObject &request) {
         const QString action = request.value("action").toString();
         if (action == "status") return status();
+        if (action == "debug-status") return debugStatus();
+        if (action == "debug-stop") { stopDebug(); return debugStatus(); }
+        if (action == "debug-start") {
+            const auto seconds = request.value("seconds").toInteger();
+            if (seconds < 1 || seconds > 300) fail("Debug duration must be between 1 and 300 seconds");
+            expireDebug();
+            if (debugUntil) fail("A bounded debug session is already active");
+            debugStarted = monotonicMs(); debugStartedWall = now(); debugUntil = debugStarted + seconds * 1000;
+            debugAttempts = attempts; debugRetained = retainedThisRun;
+            if (environment) environment->setDiagnosticsEnabled(true);
+            return debugStatus();
+        }
         ++controlRevision;
         if (action == "start" || action == "resume") {
             if (document.config.output.isEmpty() && !synthetic) fail("Choose a display in Replay settings before recording");
-            intent = "running"; nextCapture = 0;
+            intent = "running"; nextCapture = 0; captureRetryCount = 0;
         } else if (action == "pause") intent = "paused";
         else if (action == "stop") intent = "stopped";
         else if (action == "shutdown") { intent = "stopped"; shuttingDown = true; }
@@ -486,13 +547,14 @@ public:
             checkStorage();
             stopIndex(); if (recorder) recorder->breakContinuity();
             deletion = {{"from_ms", now() - seconds * 1000}, {"to_ms", now() + 1}, {"directory", paths.historyDirectory}};
-            nextMaintenance = 0;
+            nextMaintenance = 0; nextForecast = 0; storageForecastResult = {};
         } else fail("Unknown recording control");
         if (intent != "running") transition(intent, intent == "paused" ? "Recording is paused until you resume." : "Recording is stopped.");
         saveIntent(); return status();
     }
     void tick(const std::function<bool()> &stopRequested) {
         if (tickActive || stopRequested()) return;
+        expireDebug();
         QScopedValueRollback<bool> tickGuard(tickActive, true);
         const qint64 time = monotonicMs();
         if (time >= nextConfig) {
@@ -529,9 +591,6 @@ public:
         if (intent != "running" || shuttingDown || stopRequested()) return;
         if (!desktop.captureAllowed) { transition(desktop.reason, desktop.detail); nextCapture = time + 1000; return; }
         if (!deletion.isEmpty()) { transition("deleting", "Removing the selected history interval."); return; }
-        if (storageBlocked || usage.value("disk_bytes").toInteger() >= document.config.maxDiskMiB * MiB) {
-            transition("storage-full", "Disk allowance reached. Increase it or change retention; existing history is preserved."); nextCapture = time + 1000; return;
-        }
         if (!synthetic && configError.isEmpty() && document.config.outputIdentity.isEmpty() && !desktop.outputIdentity.isEmpty()) {
             auto pinned = document.config; pinned.outputIdentity = desktop.outputIdentity;
             saveReplayConfig(pinned, document.original); document = loadReplayConfig();
@@ -562,15 +621,27 @@ public:
             const auto after = environment ? environment->snapshot() : desktop;
             if (!after.captureAllowed || after.generation != desktop.generation) {
                 desktop = after; transition(after.captureAllowed ? "desktop-changed" : after.reason,
-                    after.captureAllowed ? "Desktop changed during capture; waiting for the next moment." : after.detail); return;
+                    after.captureAllowed ? "Desktop changed during capture; waiting for the next moment." : after.detail);
+                // Discard uncertain pixels without spinning through new capture
+                // connections. Repeated changes back off up to the capture interval.
+                const qint64 interval = qint64(document.config.intervalSeconds * 1000);
+                const qint64 delay = std::min(interval, qint64(250) << std::min(captureRetryCount, 5));
+                captureRetryCount = std::min(captureRetryCount + 1, 5);
+                nextCapture = monotonicMs() + delay;
+                return;
             }
             checkStorage();
             const qint64 capturedAt = now();
             const auto added = recorder->addFrame(image, capturedAt);
             if (added.stored || added.duplicate) { ++retainedThisRun; lastRetained = capturedAt; }
+            captureRetryCount = 0;
             transition("recording", "Recording the selected display.");
             // Missed ticks are a gap, never a burst of captures after wake.
             nextCapture = monotonicMs() + qint64(document.config.intervalSeconds * 1000);
+        } catch (const RollingStorageUnavailable &error) {
+            usage = historyUsage(paths.historyDirectory); nextForecast = 0; nextMaintenance = 0;
+            transition(error.retryable ? "storage-cleanup" : "storage-full", QString::fromUtf8(error.what()));
+            nextCapture = monotonicMs() + std::max<qint64>(qint64(document.config.intervalSeconds * 1000), 1000);
         } catch (const std::exception &error) {
             const QString message = QString::fromUtf8(error.what());
             try { checkStorage(); }
@@ -578,10 +649,9 @@ public:
                 loseStorage(QString::fromUtf8(storageFailure.what())); nextCapture = monotonicMs() + 1000; return;
             }
             closeCapture();
-            storageBlocked = message.contains("disk", Qt::CaseInsensitive) || message.contains("budget", Qt::CaseInsensitive);
+            const bool storageBlocked = message.contains("disk", Qt::CaseInsensitive) || message.contains("budget", Qt::CaseInsensitive);
             if (storageBlocked) {
-                usage = historyUsage(paths.historyDirectory); blockedDiskBytes = usage.value("disk_bytes").toInteger();
-                QStorageInfo disk(paths.historyDirectory); disk.refresh(); blockedFreeBytes = disk.bytesAvailable();
+                usage = historyUsage(paths.historyDirectory); nextForecast = 0; nextMaintenance = 0;
             }
             transition(storageBlocked ? "storage-full" : "capture-error", message.left(500));
             nextCapture = monotonicMs() + 5000;
@@ -637,11 +707,11 @@ int runRecordingService(const std::function<bool()> &stopRequested, bool synthet
 
 int recordingCommand(const QStringList &arguments, const std::function<bool()> &stopRequested) {
     QCommandLineParser parser; parser.setApplicationDescription("Replay shared history and background recorder.");
-    parser.addHelpOption(); parser.addPositionalArgument("action", "run | init | paths | status | start | pause | resume | stop | shutdown | index-pause | index-resume | reload | delete-recent");
+    parser.addHelpOption(); parser.addPositionalArgument("action", "run | init | paths | status | start | pause | resume | stop | shutdown | index-pause | index-resume | reload | delete-recent | debug");
     parser.addOptions({{"synthetic", "Use fictional images for an isolated test; never read a display."},
         {"synthetic-environment", "Synthetic lifecycle observations; requires --synthetic.", "path"},
         {"output", "Explicit display selection when initializing settings.", "name"},
-        {"seconds", "Recent interval to delete, up to 86400 seconds.", "seconds"},
+        {"seconds", "Recent deletion interval, or debug duration (1–300 seconds; default 30).", "seconds"},
         {"confirmed", "Confirm deletion of the requested interval."}});
     parser.process(arguments);
     const auto positional = parser.positionalArguments();
@@ -650,7 +720,8 @@ int recordingCommand(const QStringList &arguments, const std::function<bool()> &
     if (parser.isSet("synthetic") && action != "run") fail("Synthetic mode is only valid for daemon run");
     if (parser.isSet("synthetic-environment") && !parser.isSet("synthetic")) fail("Synthetic lifecycle input requires --synthetic");
     if (parser.isSet("output") && action != "init") fail("Display selection is only valid for daemon init");
-    if ((parser.isSet("seconds") || parser.isSet("confirmed")) && action != "delete-recent") fail("Deletion options require delete-recent");
+    if (parser.isSet("seconds") && action != "delete-recent" && action != "debug") fail("Duration requires delete-recent or debug");
+    if (parser.isSet("confirmed") && action != "delete-recent") fail("Deletion confirmation requires delete-recent");
     if (action == "run") return runRecordingService(stopRequested, parser.isSet("synthetic"), parser.value("synthetic-environment"));
     QJsonObject result;
     if (action == "paths") {
@@ -676,6 +747,15 @@ int recordingCommand(const QStringList &arguments, const std::function<bool()> &
         }
         result = {{"config", paths.configFile}, {"history", paths.historyDirectory}, {"recording_started", false}};
     } else if (action == "status") result = recordingServiceStatus();
+    else if (action == "debug") {
+        bool valid = true;
+        const qint64 seconds = parser.isSet("seconds") ? parser.value("seconds").toLongLong(&valid) : 30;
+        if (!valid || seconds < 1 || seconds > 300) fail("Debug duration must be between 1 and 300 seconds");
+        controlRecordingService("debug-start", {{"seconds", seconds}});
+        QElapsedTimer timer; timer.start();
+        while (!stopRequested() && timer.elapsed() < seconds * 1000) QThread::msleep(50);
+        result = controlRecordingService("debug-stop");
+    }
     else {
         QJsonObject options;
         if (action == "delete-recent") {

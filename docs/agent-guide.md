@@ -99,7 +99,7 @@ The default file is `~/.config/omarchy-replay/config.toml`; an absolute `XDG_CON
 | `recording` | `interval_seconds` | Number, 0.25–60; default 5. |
 | `storage` | `directory` | Absolute existing local folder, or `""` for the default archive. No `.`/`..`, trailing slash or `/`. See storage rules below. |
 | `storage` | `retention_days` | Integer, 1–3,650; default 30. Expired observations are deleted. |
-| `storage` | `max_disk_mib` | Integer, 64–1,048,576; default 10,240. Pauses capture at the limit. |
+| `storage` | `max_disk_mib` | Integer, 64–1,048,576; default 10,240. Rolls the oldest history out to admit new moments. |
 | `storage` | `min_free_mib` | Integer, 0–1,048,576; default 1,024. Free-space reserve. |
 | `indexing` | `active_cpu_percent` | Number, 1–100; default 40. Active-desktop OCR allowance. |
 | `indexing` | `idle_cpu_percent` | Number, 1–100; default 50. Allowance after the idle delay. |
@@ -161,6 +161,8 @@ Change one relevant setting at a time within the user's requested scope. Keep a 
 
 Settings' resource prompt gives the user's agent the paths and diagnostic starting points. Replay does not automatically benchmark the computer, invoke an agent or apply a recommended profile.
 
+The `storage_forecast` in daemon status estimates how much history the **whole rolling allowance** can hold. Recent numeric metadata supports active recording hours; a retained span of at least seven calendar days also supports a rough calendar-day estimate and space for the chosen retention age. No workday length is assumed and no resource-history log is created. A full allowance is normal: the oldest history makes room for new moments. Configure the user’s requested size; do not enlarge it automatically. Lowering the allowance or raising the free-space reserve can permanently remove older history.
+
 ## Diagnose and recover
 
 ```bash
@@ -168,6 +170,8 @@ Settings' resource prompt gives the user's agent the paths and diagnostic starti
 systemctl --user status omarchy-replay.service
 journalctl --user -u omarchy-replay.service -n 80 --no-pager
 ```
+
+For a requested capture-retry investigation, run `"$replay_bin" daemon debug --seconds 30`. It requires an already running coordinator, collects fixed field/event names and counts in memory, and stops after 1–300 seconds. It does not start capture, save a monitoring history, or include screen content. Use the existing five-second capture rate when comparing attempts, retained moments and coverage before/after a fix; a lower CPU result with fewer observations is not a free improvement.
 
 The state folder contains bounded `recording.log`, its previous rotation, saved intent, `last-valid-config.toml` and a worker error tail when applicable. Review only relevant local output. A journal failure can also occur before the coordinator creates its own log.
 

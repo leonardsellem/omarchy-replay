@@ -179,9 +179,112 @@ void screensaver() {
     std::cout << "PASS mandatory screensaver exclusion, identity, display scope and recovery\n";
 }
 
+void safetyGeneration() {
+    auto observed = ready();
+    auto first = window(), second = window("fixture.browser", 1000);
+    second["address"] = "0x5678";
+    observed.windows = {first, second};
+    replay::RecordingEnvironment environment([&] { return observed; }); environment.configure(options());
+    const auto before = environment.snapshot();
+    auto display = monitor();
+    display["directScanoutTo"] = "0x1234"; display["directScanoutBlockedBy"] = "none";
+    display["focused"] = false; display["activelyTearing"] = true;
+    first["focusHistoryID"] = 5; second["focusHistoryID"] = 0;
+    first["unrecognizedBookkeeping"] = "render-only";
+    observed.monitors = {monitor("TEST-2", 1920), display};
+    observed.windows = {second, first};
+    const auto after = environment.snapshot();
+    require(after.captureAllowed && after.generation == before.generation,
+            "Render/focus bookkeeping or record ordering invalidated a safe capture");
+
+    // Every guard input must retain its value and type in the retention fence.
+    // Start each mutation from valid state to avoid relying on earlier failures.
+    const QStringList monitorFields{"name", "id", "make", "model", "serial", "description", "disabled", "dpmsStatus",
+        "x", "y", "width", "height", "scale", "transform", "mirrorOf"};
+    for (const auto &field : monitorFields) {
+        observed = ready(); const auto stable = environment.snapshot();
+        display = monitor();
+        const auto original = display.value(field);
+        if (original.isBool()) display[field] = !original.toBool();
+        else if (original.isDouble()) display[field] = original.toDouble() + 1;
+        else display[field] = original.toString() + "-changed";
+        observed.monitors = {display, monitor("TEST-2", 1920)};
+        require(environment.snapshot().generation != stable.generation, "Monitor safety input omitted from generation");
+    }
+    const QStringList windowFields{"mapped", "hidden", "visible", "at", "size", "class", "initialClass", "title", "address"};
+    for (const auto &field : windowFields) {
+        observed = ready(); const auto stable = environment.snapshot();
+        auto client = window();
+        const auto original = client.value(field);
+        if (original.isBool()) client[field] = !original.toBool();
+        else if (original.isArray()) { auto pair = original.toArray(); pair[0] = pair[0].toDouble() + 1; client[field] = pair; }
+        else client[field] = original.toString() + "-changed";
+        observed.windows = {client};
+        require(environment.snapshot().generation != stable.generation, "Window safety input omitted from generation");
+    }
+    for (const auto &field : {QString("visible"), QString("mapped"), QString("title"), QString("size")}) {
+        observed = ready(); const auto stable = environment.snapshot();
+        auto client = window(); client.remove(field); observed.windows = {client};
+        const auto missing = environment.snapshot();
+        require(!missing.captureAllowed && missing.generation != stable.generation,
+                "Missing required window field did not close and invalidate capture");
+        client[field] = QJsonValue::Null; observed.windows = {client};
+        const auto wrong = environment.snapshot();
+        require(!wrong.captureAllowed && wrong.generation != missing.generation,
+                "Missing and wrongly typed required window metadata were collapsed");
+    }
+    observed = ready(); const auto beforeDisplayChange = environment.snapshot();
+    observed.waylandDisplay = "wayland-replacement";
+    require(environment.snapshot().generation != beforeDisplayChange.generation,
+            "Capture socket identity omitted from generation");
+    observed = ready(); const auto beforeExcludedFlash = environment.snapshot();
+    // Native open/close events both advance this counter even when the excluded
+    // window has disappeared by the time a blocked capture returns.
+    observed.eventGeneration += 2;
+    const auto afterExcludedFlash = environment.snapshot();
+    require(afterExcludedFlash.captureAllowed && afterExcludedFlash.generation != beforeExcludedFlash.generation,
+            "Rapid excluded-window show/hide was lost by canonicalization");
+    std::cout << "PASS canonical safety generation, bookkeeping stability, required types and rapid privacy transitions\n";
+}
+
+void diagnostics() {
+    auto observed = ready();
+    replay::RecordingEnvironment environment([&] { return observed; }); environment.configure(options());
+    environment.snapshot();
+    require(!environment.diagnostics().value("enabled").toBool() && environment.diagnostics().value("snapshots").toInt() == 0,
+            "Diagnostics sampled without an explicit opt-in");
+    environment.setDiagnosticsEnabled(true);
+    const auto before = environment.snapshot();
+    auto display = monitor(); display["directScanoutTo"] = "private-window-address";
+    display["private-arbitrary-field-name"] = "private-field-value";
+    auto client = window(); client["focusHistoryID"] = 3;
+    observed.monitors = {display, monitor("TEST-2", 1920)}; observed.windows = {client};
+    require(environment.snapshot().generation == before.generation, "Diagnostic opt-in changed capture generation");
+    auto report = environment.diagnostics();
+    const auto fields = report.value("observed_field_changes").toObject();
+    require(fields.value("monitors.directScanoutTo").toInt() == 1 && fields.value("windows.focusHistoryID").toInt() == 1 &&
+            fields.value("monitors.other").toInt() == 1 && report.value("state_changes").toInt() == 0,
+            "Diagnostics did not distinguish ignored raw fields from safety changes");
+    client["title"] = "private-window-title"; observed.windows = {client}; environment.snapshot();
+    report = environment.diagnostics();
+    require(report.value("state_field_changes").toObject().value("windows").toInt() == 1,
+            "Diagnostics missed a safety metadata transition");
+    require(!QJsonDocument(report).toJson().contains("private-"), "Diagnostic output exposed metadata keys or values");
+    environment.setDiagnosticsEnabled(false);
+    const auto frozen = environment.diagnostics();
+    observed = ready(); environment.snapshot();
+    require(environment.diagnostics() == frozen, "Disabled diagnostics continued monitoring");
+    environment.setDiagnosticsEnabled(true);
+    require(environment.diagnostics().value("snapshots").toInt() == 0 &&
+            environment.diagnostics().value("observed_field_changes").toObject().isEmpty(),
+            "A new debug session retained old observations");
+    std::cout << "PASS explicit temporary diagnostics, field-only reports, freeze and reset\n";
+}
+
 void events() {
     for (const QByteArray &event : {"openwindow>>abc,1,fixture,title", "closewindow>>abc", "movewindowv2>>abc,2,2",
-            "monitorremoved>>TEST-1", "monitoradded>>TEST-1", "configreloaded>>", "windowtitlev2>>abc,title", "unknown>>", "malformed"})
+            "monitorremoved>>TEST-1", "monitoradded>>TEST-1", "configreloaded>>", "windowtitlev2>>abc,title",
+            "activewindowv2>>abc", "unknown>>", "malformed"})
         require(replay::RecordingEnvironment::invalidatingEvent(event), "Coverage transition was ignored");
     require(!replay::RecordingEnvironment::invalidatingEvent("screencastv2>>1,0,TEST-1"), "Own capture invalidated itself");
     std::cout << "PASS event classification and own-capture feedback prevention\n";
@@ -202,7 +305,7 @@ int main(int argc, char **argv) {
             return result.reason == "ready" || result.reason == "excluded_window" || result.reason == "locked" ||
                 result.reason == "exclusions_unverified" ? 0 : 1;
         }
-        lifecycle(); unknowns(); outputs(); exclusions(); screensaver(); events();
+        lifecycle(); unknowns(); outputs(); exclusions(); screensaver(); safetyGeneration(); diagnostics(); events();
     } catch (const std::exception &error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return 0;
 }

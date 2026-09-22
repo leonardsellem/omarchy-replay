@@ -8,7 +8,7 @@ Updated 2026-09-20. This records implemented behavior, remaining validation and 
 | --- | --- |
 | 1. Shared history | One appendable local archive across restarts, stable moment IDs, one capture owner, recoverable originals and a single OCR worker for shared history. |
 | 2. Background recorder and configuration | `omarchy-replay.service`, durable running/paused/stopped intent, optional login startup, validated TOML and XDG directories. Fresh installation starts with capture stopped. |
-| 3. Moving retention | Capture-time age window, independent disk/free-space limits, bounded expiry and media cleanup, in-flight indexing protection. Capacity exhaustion pauses capture without shortening retention. |
+| 3. Moving retention | Capture-time age window, independent disk/free-space limits, bounded expiry and media cleanup, in-flight indexing protection. The oldest history rolls out as new moments need room within the storage allowance. |
 | 4. Native controls and lifecycle | Super+Alt+R summon/dismiss, recording and indexing controls plus Settings under I, lock/sleep/display/compositor gates and explicit gaps. Temporary conditions never override a manual pause. |
 | 5. Exclusions and deletion | Mandatory Replay masking, default 1Password app identifier, configurable exact app/title rules, visible-window pickers and confirmed delete-recent action. |
 
@@ -47,7 +47,7 @@ Inactivity alone does not stop capture; it changes the OCR allowance. Retained i
 
 The default is a moving **30-day** capture-time window, **10 GiB** dataset allowance and **1 GiB** free-space floor. Users can adjust all three. Viewing/indexing does not renew an observation's age. Repeated observations can share an image: the original remains until its final retained reference expires. Expiration removes text, highlight geometry, queued work and unneeded media together; in-flight OCR cannot restore deleted evidence. Cleanup uses bounded batches and incremental SQLite reclamation.
 
-A full disk allowance pauses capture with an explanation. It does not evict unexpired history silently. Shortening retention in Settings and deleting recent history both require a concrete confirmation. File edits are an explicit configuration change and apply through validation/reload. Future S3 offload must preserve capture-time age and eventually expire managed remote copies too.
+A full disk allowance rolls out the oldest observations, including those younger than the maximum age, so new recording can continue. Settings explains this behavior and reviews changes that reduce retained history. Deleting recent history requires a concrete confirmation. File edits are an explicit configuration change and apply through validation/reload. Future S3 offload must preserve capture-time age and eventually expire managed remote copies too.
 
 ### Exclusion scope
 
@@ -122,3 +122,7 @@ The [post-trial efficiency research](pipeline-efficiency-research.md) proposes s
 ## Prototype trials
 
 Use the finite prototype command in [the personal trial guide](personal-trial.md). It collects local diagnostics for recording, indexing and recall. Shared recording, configuration/settings, rolling retention and exclusions are implemented separately from finite trials. Coding-agent integration remains planned. Enabling a trial does not enable login recording. Select a project license before a public release; none has been adopted yet.
+
+## Capture efficiency and diagnostics — 2026-09-22
+
+Similarity grouping remains deferred and the default capture interval remains five seconds. The current iteration narrows desktop generation comparisons to capture-safety fields, bounds discarded-capture retries, and adds a capacity forecast under I and in Settings. The storage allowance rolls out the oldest history to admit new captures; Settings previews capacity while editing the size. Resource and power history is not collected continuously; investigations use explicitly requested, bounded diagnostics. Storage allowance remains a separate user choice from retention age.

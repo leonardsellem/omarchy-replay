@@ -517,3 +517,16 @@ The user clarified that Replay is an installed Omarchy plugin: end users will no
 ## Screensaver exclusion — 2026-09-20
 
 The user requested that Omarchy's screensaver be excluded. Its exact app ID, `org.omarchy.screensaver`, is now mandatory alongside Replay's own exclusion, including when the configured app list is customized or empty. A visible screensaver on the recorded display pauses capture and receives a compositor mask. Closing it permits capture only when saved intent is running and other environment checks pass. Manual Pause/Stop remains in effect, and OCR can continue while the computer is awake. This policy does not establish real hardware screensaver or sleep/wake validation.
+
+## Capture retry and capacity decisions — 2026-09-22
+
+Keep the five-second capture interval and defer similarity grouping. The user approved fixing capture retries and adding a storage-capacity forecast/warning. Historical resource monitoring should run only for requested debugging, not continuously. The forecast can use existing history metadata without a telemetry log. Changes must preserve lock, sleep, display and exclusion protection and report retained coverage alongside any performance improvement.
+
+
+## Rolling storage correction — 2026-09-22
+
+The user clarified that storage must be a rolling window. The earlier implementation and recommendations that stopped recording at the byte limit did not meet this requirement. Shared history now removes the oldest observations as new moments need space, while retention age remains a separate maximum. This supersedes the stop-at-capacity statements above; finite trials remain separate. Lowering an allowance can shorten the available timeline.
+
+Settings should help users choose the size: show capacity from observed usage and update the estimate while the size is edited. Use active recording hours after a short sample. Estimate calendar days and space for the age window only after enough retained calendar history exists; do not invent an eight-hour workday. Diagnostics remain opt-in.
+
+The user also proposed compressing older images during downtime or reducing resolution. These remain options to benchmark, with screen-text readability, OCR coordinates, random-access latency, temporary disk use and total CPU cost as acceptance criteria. Similarity-based omission and longer capture intervals remain deferred. See [storage efficiency options](storage-efficiency-options.md).

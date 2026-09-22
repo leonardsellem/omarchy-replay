@@ -30,6 +30,8 @@ The coordinator starts one index worker when pending work exists. It keeps the w
 
 A capture tick checks the compositor, user session, lock/sleep state, selected display and exclusions. Replay checks those conditions again after acquiring the image. A state-generation change invalidates that sample before it enters the archive. Monotonic time schedules captures; wall-clock timestamps identify observations and determine expiration.
 
+The generation comparison uses the fields required by those checks, in stable order. Compositor rendering bookkeeping does not invalidate an otherwise safe sample. Events still protect rapid transitions that begin and end between snapshots. An invalidated capture is discarded; retries back off from 250 ms up to the configured capture interval. A successful capture restores normal scheduling.
+
 The selected display includes a connector and a pinned hardware identity. Replay waits when it disappears or is replaced. After compositor restart, Replay validates the new Wayland socket and exclusion rules before capture resumes. Late ticks do not trigger a burst of catch-up screenshots.
 
 Shared history uses lossless WebP originals at capture resolution. Each accepted image is stored before OCR runs. A consecutive identical image can share its original and frame record while adding another timestamped observation. A capture gap breaks that continuity.
@@ -104,11 +106,13 @@ Three independent controls govern storage:
 2. `max_disk_mib` limits the selected archive's disk use.
 3. `min_free_mib` reserves free space on that filesystem.
 
-Reaching capacity pauses capture. Replay does not shorten the age window silently to create room. Expiration, explicit deletion, more available space or a larger allowance can permit recording again.
+Shared recording uses a rolling storage allowance. Before admitting a new original, the recorder can reclaim the oldest observations and unreferenced media to make room. The retained interval is bounded by both maximum age and available storage; a full allowance does not permanently stop recording. Cleanup is bounded, and capture can wait between batches or when sufficient space cannot be reclaimed safely. Finite trial archives retain their original stop-at-limit behavior.
 
 Maintenance deletes bounded batches of observations, then unreferenced frames and media. Repeated-image references keep an original alive until its last retained observation expires. SQLite reclamation is incremental. Normal maintenance runs every 10 seconds, with further batches scheduled sooner while cleanup remains.
 
-Recent-history deletion stops interfering work, records its interval durably and completes bounded cleanup. Settings asks for confirmation before shortening retention; recent deletion requires separate confirmation. Direct TOML edits are operational: lowering retention applies the shorter window when the coordinator accepts it. Replay does not promise forensic erasure from backups, filesystem snapshots or underlying storage.
+Older prototype databases without incremental vacuum cannot shrink their index in place. If that index alone exceeds a reduced allowance, Replay preserves the remaining history and reports that separate compaction or a larger allowance is needed. New shared histories support bounded index reclamation.
+
+Recent-history deletion stops interfering work, records its interval durably and completes bounded cleanup. Settings reviews shorter retention, a smaller allowance or a larger free-space reserve; recent deletion requires separate confirmation. Direct TOML edits are operational: lowering retention applies the shorter window when the coordinator accepts it. Replay does not promise forensic erasure from backups, filesystem snapshots or underlying storage.
 
 ## Storage location and configuration
 
@@ -147,6 +151,10 @@ The private socket accepts one bounded request per connection. The client does n
 Pending OCR survives process exit. Startup recovers incomplete media publication and cleanup work. An interrupted OCR pass stays pending; a genuine recognition/source error becomes failed. Retrying failed content is separate from restarting a failed worker. Legacy trial archives retain their own policies and remain separate from shared history.
 
 Status includes capture intent and block reason, indexing coverage, oldest pending age, archive usage and worker policy/enforcement. Coordinator logs are bounded. Error logs and status can contain local paths or window information and remain private diagnostics.
+
+Storage forecasts read at most 2,001 recent observations from the last 24 hours once per minute, using existing numeric metadata. The estimate credits bounded capture intervals, rather than time spent locked or paused, and counts each new original once. It reports the active recording hours that the effective rolling allowance can hold, after five minutes of sampled activity. With at least seven retained calendar days, existing archive size and time bounds also support a rough daily-growth estimate, projected capacity in days, and space for the selected age window. Settings reuses these rates when the user changes size, reserve or age. Changing capture settings or the archive saves one sampling boundary with the existing coordinator state; rates then use only later observations, including after restart. Calendar projections wait until older observations have left the archive, so their bytes are not attributed to the new settings. Estimates do not guarantee future workload or database growth. No resource-history series is recorded.
+
+Capture diagnostics are opt-in: `daemon debug --seconds 30` enables bounded in-memory counters on an already running coordinator, then disables them. The range is 1–300 seconds, with a server-side expiry even if the client exits. Output contains fixed field/event names and counts, never metadata values, images or OCR. Offline debugging does not start the service or change recording intent. CPU, memory and power measurements remain explicit diagnostic work.
 
 ## Verification and limits
 

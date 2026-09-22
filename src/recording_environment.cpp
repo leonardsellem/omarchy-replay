@@ -26,6 +26,7 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+#include <utility>
 #include <wayland-client.h>
 
 namespace replay {
@@ -129,6 +130,83 @@ QRegularExpression titleExpression(const QString &text) {
     // Bound PCRE's work even for a user-supplied pathological expression.
     return QRegularExpression("(*LIMIT_MATCH=10000)(*LIMIT_DEPTH=1000)(?:" + text + ')');
 }
+
+// Only fields consumed by capture guards belong in the retention fence.
+// In particular, capture itself can change compositor render bookkeeping such
+// as directScanoutTo. Including it would make a safe capture invalidate itself.
+const QStringList MonitorSafetyFields{
+    "name", "id", "make", "model", "serial", "description", "disabled", "dpmsStatus",
+    "x", "y", "width", "height", "scale", "transform", "mirrorOf"};
+const QStringList WindowSafetyFields{
+    "mapped", "hidden", "visible", "at", "size", "class", "initialClass", "title", "address"};
+const QStringList MonitorDiagnosticFields = MonitorSafetyFields + QStringList{
+    "focused", "directScanoutTo", "directScanoutBlockedBy", "activelyTearing", "vrr", "refreshRate",
+    "activeWorkspace", "specialWorkspace", "reserved", "currentFormat", "availableModes"};
+const QStringList WindowDiagnosticFields = WindowSafetyFields + QStringList{
+    "focusHistoryID", "pid", "monitor", "workspace", "pinned", "floating", "fullscreen",
+    "fullscreenClient", "initialTitle", "xwayland", "swallowing", "grouped", "tags", "inhibitingIdle"};
+
+QJsonArray canonicalRecords(const QJsonArray &records, const QStringList &fields, bool remainder = false) {
+    QVector<std::pair<QByteArray, QJsonValue>> sorted;
+    sorted.reserve(records.size());
+    for (const auto &record : records) {
+        QJsonValue value = record;
+        if (record.isObject()) {
+            const auto object = record.toObject();
+            QJsonObject selected;
+            if (remainder) {
+                selected = object;
+                for (const auto &key : fields) selected.remove(key);
+            } else {
+                for (const auto &key : fields)
+                    if (object.contains(key)) selected.insert(key, object.value(key));
+            }
+            value = selected;
+        }
+        // Keep missing keys, nulls and wrong types distinct. Sorting removes
+        // client enumeration order without removing any client or its identity.
+        sorted.append({QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact), value});
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto &left, const auto &right) { return left.first < right.first; });
+    QJsonArray result;
+    for (const auto &entry : sorted) result.append(entry.second);
+    return result;
+}
+
+QJsonObject safetyState(const EnvironmentObservation &observed) {
+    return {
+        {"compositor", observed.compositorAvailable}, {"notify", observed.lockNotificationsAvailable},
+        {"lock_known", observed.compositorLockKnown}, {"locked", observed.compositorLocked},
+        {"session_known", observed.sessionKnown}, {"active", observed.sessionActive}, {"session_locked", observed.sessionLocked},
+        {"sleep_known", observed.sleepKnown}, {"sleep", observed.sleeping}, {"shutdown", observed.shuttingDown},
+        {"config_known", observed.configKnown}, {"config_error", observed.configError},
+        {"exclusions_verified", observed.exclusionsVerified}, {"config_generation", qint64(observed.configGeneration)},
+        {"instance", observed.compositorInstance}, {"wayland_display", observed.waylandDisplay},
+        {"events", qint64(observed.eventGeneration)},
+        {"monitors", observed.monitors.size() <= 64 ? QJsonValue(canonicalRecords(observed.monitors, MonitorSafetyFields)) : QJsonValue("over_limit")},
+        {"windows", observed.windows.size() <= 4096 ? QJsonValue(canonicalRecords(observed.windows, WindowSafetyFields)) : QJsonValue("over_limit")}};
+}
+
+void increment(QJsonObject &counts, const QString &key) {
+    // Keys are fixed labels from this file; never put event payloads or arbitrary
+    // compositor keys into diagnostic output. All counters saturate in memory.
+    if (!counts.contains(key) && counts.size() >= 64) return;
+    counts.insert(key, std::min(1000000000.0, counts.value(key).toDouble() + 1));
+}
+
+QString diagnosticEventName(const QByteArray &event) {
+    static const QList<QByteArray> known{
+        "workspace", "workspacev2", "focusedmon", "focusedmonv2", "activewindow", "activewindowv2",
+        "fullscreen", "monitorremoved", "monitoradded", "monitoraddedv2", "createworkspace", "createworkspacev2",
+        "destroyworkspace", "destroyworkspacev2", "moveworkspace", "moveworkspacev2", "renameworkspace",
+        "activespecial", "activespecialv2", "activelayout", "openwindow", "closewindow", "movewindow", "movewindowv2",
+        "openlayer", "closelayer", "submap", "changefloatingmode", "urgent", "minimize", "screencast", "screencastv2",
+        "windowtitle", "windowtitlev2", "togglegroup", "moveintogroup", "moveoutofgroup", "ignoregrouplock",
+        "lockgroups", "configreloaded", "pin", "bell"};
+    const auto separator = event.indexOf(">>");
+    const auto name = separator < 1 ? QByteArray{} : event.left(separator);
+    return known.contains(name) ? QString::fromLatin1(name) : QStringLiteral("other");
+}
 }
 
 struct RecordingEnvironment::Impl {
@@ -137,7 +215,11 @@ struct RecordingEnvironment::Impl {
     EnvironmentOptions options;
     QString invalidOptions, pinnedIdentity;
     quint64 sequence = 1, events = 0, configEvents = 0;
-    QByteArray lastState;
+    QJsonObject lastState;
+    bool diagnosticsEnabled = false, diagnosticBaseline = false;
+    QJsonObject diagnosticEvents, diagnosticInvalidatingEvents, diagnosticFields, diagnosticStateFields, diagnosticTransitions;
+    QJsonArray diagnosticMonitors, diagnosticWindows;
+    quint64 diagnosticSnapshots = 0, diagnosticStateChanges = 0;
     QString socketDirectory, instance, waylandName, sessionPath, sessionId;
     pid_t compositorPid = 0;
     int eventFd = -1;
@@ -153,7 +235,36 @@ struct RecordingEnvironment::Impl {
 
     Impl(RecordingEnvironment *object, Source injected) : owner(object), source(std::move(injected)) {}
     ~Impl() { closeCompositor(); }
-    void transition() { ++sequence; ++events; }
+    void transition(const QString &category = {}) {
+        ++sequence; ++events;
+        if (diagnosticsEnabled && !category.isEmpty()) increment(diagnosticTransitions, category);
+    }
+    void observeDiagnostics(const EnvironmentObservation &observed, const QJsonObject &state) {
+        if (!diagnosticsEnabled) return;
+        diagnosticSnapshots = std::min(quint64(1000000000), diagnosticSnapshots + 1);
+        if (observed.monitors.size() > 64 || observed.windows.size() > 4096) {
+            increment(diagnosticFields, "over_limit");
+            diagnosticMonitors = {}; diagnosticWindows = {}; diagnosticBaseline = false;
+            return;
+        }
+        if (diagnosticBaseline) {
+            if (state != lastState) {
+                diagnosticStateChanges = std::min(quint64(1000000000), diagnosticStateChanges + 1);
+                for (auto field = state.begin(); field != state.end(); ++field)
+                    if (field.value() != lastState.value(field.key())) increment(diagnosticStateFields, field.key());
+            }
+            auto compare = [&](const QJsonArray &before, const QJsonArray &after, const QStringList &fields, const QString &prefix) {
+                if (before == after) return;
+                for (const auto &field : fields)
+                    if (canonicalRecords(before, {field}) != canonicalRecords(after, {field})) increment(diagnosticFields, prefix + field);
+                if (canonicalRecords(before, fields, true) != canonicalRecords(after, fields, true)) increment(diagnosticFields, prefix + "other");
+            };
+            compare(diagnosticMonitors, observed.monitors, MonitorDiagnosticFields, "monitors.");
+            compare(diagnosticWindows, observed.windows, WindowDiagnosticFields, "windows.");
+        }
+        diagnosticMonitors = observed.monitors; diagnosticWindows = observed.windows;
+        diagnosticBaseline = true;
+    }
     void closeCompositor() {
         eventNotifier.reset(); waylandNotifier.reset();
         if (eventFd >= 0) ::close(eventFd);
@@ -165,12 +276,12 @@ struct RecordingEnvironment::Impl {
         lockNotification = lockNotifier = nullptr; registry = nullptr; display = nullptr;
         lockReady = false; lockState = true; compositorPid = 0; socketDirectory.clear(); waylandName.clear();
     }
-    void lostCompositor() { transition(); closeCompositor(); }
+    void lostCompositor() { transition("compositor_lost"); closeCompositor(); }
     static void locked(void *data, wl_proxy *) {
-        auto &self = *static_cast<Impl *>(data); self.lockState = true; self.transition();
+        auto &self = *static_cast<Impl *>(data); self.lockState = true; self.transition("locked");
     }
     static void unlocked(void *data, wl_proxy *) {
-        auto &self = *static_cast<Impl *>(data); self.lockState = false; self.transition();
+        auto &self = *static_cast<Impl *>(data); self.lockState = false; self.transition("unlocked");
     }
     static void global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t) {
         auto &self = *static_cast<Impl *>(data);
@@ -180,7 +291,7 @@ struct RecordingEnvironment::Impl {
         static void (*listener[])(void) {reinterpret_cast<void (*)(void)>(locked), reinterpret_cast<void (*)(void)>(unlocked)};
         wl_proxy_add_listener(self.lockNotification, listener, &self);
     }
-    static void globalRemoved(void *data, wl_registry *, uint32_t) { static_cast<Impl *>(data)->transition(); }
+    static void globalRemoved(void *data, wl_registry *, uint32_t) { static_cast<Impl *>(data)->transition("registry_removed"); }
     bool dispatchWayland(int timeout = 0) {
         if (!display) return false;
         while (wl_display_prepare_read(display) != 0) if (wl_display_dispatch_pending(display) < 0) return false;
@@ -221,7 +332,13 @@ struct RecordingEnvironment::Impl {
             while ((end = eventBuffer.indexOf('\n')) >= 0) {
                 const QByteArray line = eventBuffer.left(end); eventBuffer.remove(0, end + 1);
                 if (line.startsWith("configreloaded>>")) ++configEvents;
-                if (RecordingEnvironment::invalidatingEvent(line)) transition();
+                const bool invalidates = RecordingEnvironment::invalidatingEvent(line);
+                if (diagnosticsEnabled) {
+                    const auto name = diagnosticEventName(line);
+                    increment(diagnosticEvents, name);
+                    if (invalidates) increment(diagnosticInvalidatingEvents, name);
+                }
+                if (invalidates) transition();
             }
         }
         // A flooded event channel cannot supply trustworthy transition coverage.
@@ -308,7 +425,7 @@ struct RecordingEnvironment::Impl {
                 QObject::connect(waylandNotifier.get(), &QSocketNotifier::activated, owner, [this] {
                     if (!dispatchWayland()) lostCompositor();
                 });
-                ++configEvents; transition();
+                ++configEvents; transition("compositor_connected");
                 return true;
             }
         }
@@ -321,7 +438,7 @@ struct RecordingEnvironment::Impl {
         timespec boot{}, monotonic{};
         if (clock_gettime(CLOCK_BOOTTIME, &boot) || clock_gettime(CLOCK_MONOTONIC, &monotonic)) return value;
         const qint64 offset = qint64(boot.tv_sec - monotonic.tv_sec) * 1000000000 + boot.tv_nsec - monotonic.tv_nsec;
-        if (suspendOffsetNs >= 0 && offset - suspendOffsetNs > 10000000) transition();
+        if (suspendOffsetNs >= 0 && offset - suspendOffsetNs > 10000000) transition("resume_clock");
         suspendOffsetNs = offset;
         if (!subscribed) {
             auto bus = QDBusConnection::systemBus();
@@ -408,9 +525,27 @@ void RecordingEnvironment::configure(const EnvironmentOptions &options) {
     d->options = options; d->invalidOptions = validateOptions(options);
     if (!d->options.excludedApps.contains("omarchy-replay")) d->options.excludedApps.append("omarchy-replay");
     if (!d->options.excludedApps.contains("org.omarchy.screensaver")) d->options.excludedApps.append("org.omarchy.screensaver");
-    d->pinnedIdentity = options.outputIdentity; d->lastState.clear(); d->transition();
+    d->pinnedIdentity = options.outputIdentity; d->lastState = {}; d->transition("configured");
 }
 quint64 RecordingEnvironment::generation() const { return d->sequence; }
+
+void RecordingEnvironment::setDiagnosticsEnabled(bool enabled) {
+    if (enabled && !d->diagnosticsEnabled) {
+        d->diagnosticEvents = {}; d->diagnosticInvalidatingEvents = {}; d->diagnosticFields = {};
+        d->diagnosticStateFields = {}; d->diagnosticTransitions = {};
+        d->diagnosticSnapshots = d->diagnosticStateChanges = 0;
+        d->diagnosticBaseline = false;
+    }
+    d->diagnosticsEnabled = enabled;
+    if (!enabled) { d->diagnosticMonitors = {}; d->diagnosticWindows = {}; d->diagnosticBaseline = false; }
+}
+
+QJsonObject RecordingEnvironment::diagnostics() const {
+    return {{"enabled", d->diagnosticsEnabled}, {"snapshots", qint64(d->diagnosticSnapshots)},
+        {"state_changes", qint64(d->diagnosticStateChanges)}, {"events", d->diagnosticEvents},
+        {"invalidating_events", d->diagnosticInvalidatingEvents}, {"transitions", d->diagnosticTransitions},
+        {"state_field_changes", d->diagnosticStateFields}, {"observed_field_changes", d->diagnosticFields}};
+}
 
 QString RecordingEnvironment::monitorIdentity(const QJsonObject &monitor) {
     QJsonArray identity;
@@ -426,7 +561,9 @@ bool RecordingEnvironment::invalidatingEvent(const QByteArray &event) {
     if (separator < 1) return true;
     const auto name = event.left(separator);
     // Screencast notifications come from Replay's own capture connection.
-    // Cosmetic focus/urgent/bell events do not change retained coverage.
+    // Bell/urgent/submap notifications do not change retained coverage. Focus
+    // and title events remain conservative: they may accompany visibility or
+    // exclusion changes that begin and end between the two snapshots.
     if (name == "screencast" || name == "screencastv2" || name == "bell" || name == "urgent" || name == "submap") return false;
     return true;
 }
@@ -438,15 +575,8 @@ EnvironmentSnapshot RecordingEnvironment::snapshot() {
     EnvironmentObservation observed;
     try { observed = d->source ? d->source() : d->observe(); }
     catch (...) { block("environment_unknown", "Desktop safety state could not be read."); }
-    const QByteArray state = QJsonDocument(QJsonObject{
-        {"compositor", observed.compositorAvailable}, {"notify", observed.lockNotificationsAvailable},
-        {"lock_known", observed.compositorLockKnown}, {"locked", observed.compositorLocked},
-        {"session_known", observed.sessionKnown}, {"active", observed.sessionActive}, {"session_locked", observed.sessionLocked},
-        {"sleep_known", observed.sleepKnown}, {"sleep", observed.sleeping}, {"shutdown", observed.shuttingDown},
-        {"config_known", observed.configKnown}, {"config_error", observed.configError},
-        {"exclusions_verified", observed.exclusionsVerified}, {"config_generation", qint64(observed.configGeneration)},
-        {"instance", observed.compositorInstance}, {"events", qint64(observed.eventGeneration)},
-        {"monitors", observed.monitors}, {"windows", observed.windows}}).toJson(QJsonDocument::Compact);
+    const QJsonObject state = safetyState(observed);
+    d->observeDiagnostics(observed, state);
     if (state != d->lastState) { ++d->sequence; d->lastState = state; }
     result.generation = d->sequence;
     result.configGeneration = observed.configGeneration;
@@ -535,9 +665,9 @@ EnvironmentSnapshot RecordingEnvironment::snapshot() {
     return result;
 }
 
-void RecordingEnvironment::prepareForSleep(bool sleeping) { d->sleepSignal = sleeping; d->transition(); }
-void RecordingEnvironment::prepareForShutdown(bool shuttingDown) { d->shutdownSignal = shuttingDown; d->transition(); }
-void RecordingEnvironment::sessionSignal() { d->transition(); }
-void RecordingEnvironment::sessionProperties(const QString &, const QVariantMap &, const QStringList &) { d->transition(); }
+void RecordingEnvironment::prepareForSleep(bool sleeping) { d->sleepSignal = sleeping; d->transition("sleep"); }
+void RecordingEnvironment::prepareForShutdown(bool shuttingDown) { d->shutdownSignal = shuttingDown; d->transition("shutdown"); }
+void RecordingEnvironment::sessionSignal() { d->transition("session_signal"); }
+void RecordingEnvironment::sessionProperties(const QString &, const QVariantMap &, const QStringList &) { d->transition("session_properties"); }
 
 } // namespace replay

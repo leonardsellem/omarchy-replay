@@ -12,6 +12,7 @@
 #include <QDialogButtonBox>
 #include <QComboBox>
 #include <QSpinBox>
+#include <QDoubleSpinBox>
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QTabWidget>
@@ -282,6 +283,133 @@ private slots:
         QCOMPARE(service.calls().size(), 6);
     }
 
+    void storageCapacityUsesServiceForecastAndClearsStaleEstimates() {
+        QTemporaryDir temporary;
+        ViewerEnvironment environment(temporary.path());
+        const QString directory = replay::replayPaths().historyDirectory;
+        FakeRecording service;
+        service.status["running"] = true;
+        service.status["state"] = "storage-cleanup";
+        service.status["history_directory"] = directory;
+        service.status["max_disk_mib"] = 10240;
+        service.status["usage"] = QJsonObject{{"disk_bytes", 8.0 * 1024 * 1024 * 1024}};
+        service.status["storage_forecast"] = QJsonObject{{"state", "ready"}, {"capacity_active_hours", 4.0},
+            {"warning", "none"}, {"limiting_factor", "allowance"}, {"limited_sample", false},
+            {"estimate_note", "Based on recent saved images; sleep is not active recording time."}};
+        auto viewer = replay::createViewer(directory, service.hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(!viewer->property("historyLoading").toBool());
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_I);
+        auto* capacity = viewer->findChild<QLabel*>("recordingStorageCapacity");
+        QVERIFY(capacity && capacity->isVisible());
+        QVERIFY(viewer->findChild<QLabel*>("recordingStatus")->text().contains("Rolling out oldest history"));
+        QVERIFY(capacity->text().contains("8.0 / 10.0 GiB used"));
+        QVERIFY(capacity->text().contains("4.0 active recording hours"));
+        QVERIFY(capacity->toolTip().contains("sleep is not active"));
+        auto refresh = [&](const QJsonObject& forecast) {
+            { QMutexLocker guard(&service.mutex); service.status["storage_forecast"] = forecast; }
+            viewer->findChild<QPushButton*>("refreshHistory")->click();
+        };
+        refresh({{"state", "ready"}, {"capacity_active_hours", .5}, {"warning", "free-space"},
+            {"limiting_factor", "free-space"}, {"limited_sample", true}});
+        QTRY_VERIFY(capacity->text().contains("0.5 active recording hours"));
+        QVERIFY(capacity->text().contains("Available disk space reduces this capacity"));
+        QVERIFY(capacity->text().contains("recording continues"));
+        QVERIFY(!capacity->text().contains("Capture pauses"));
+        refresh({{"state", "insufficient-data"}, {"warning", "none"}, {"limiting_factor", "allowance"}});
+        QTRY_VERIFY(capacity->text().contains("More recorded history"));
+        QVERIFY(!capacity->text().contains("active recording hours"));
+        refresh({{"state", "insufficient-data"}, {"warning", "none"}});
+        QTRY_VERIFY(capacity->text().contains("More recorded history"));
+        refresh({{"state", "no-growth"}, {"warning", "none"}, {"capacity_active_hours", QJsonValue::Null}});
+        QTRY_VERIFY(capacity->text().contains("No recent storage growth"));
+        QVERIFY(!capacity->text().contains("0.0 active recording hours"));
+        {
+            QMutexLocker guard(&service.mutex);
+            service.status["running"] = false;
+            service.status["storage_forecast"] = QJsonObject{{"state", "ready"}, {"capacity_active_hours", 4.0}};
+        }
+        viewer->findChild<QPushButton*>("refreshHistory")->click();
+        QTRY_VERIFY(capacity->text().contains("background service is stopped"));
+        QVERIFY(!capacity->text().contains("4.0"));
+        {
+            QMutexLocker guard(&service.mutex);
+            service.status["running"] = true;
+            service.status["history_directory"] = temporary.filePath("unavailable-disk/history");
+            service.status["storage_available"] = false;
+        }
+        viewer->findChild<QPushButton*>("refreshHistory")->click();
+        QTRY_VERIFY(capacity->text().contains("unavailable for this history folder"));
+        QVERIFY(!capacity->text().contains("4.0"));
+        QCOMPARE(viewer->property("historyDirectory").toString(), directory);
+        QVERIFY(service.calls().isEmpty());
+        QVERIFY(!QFileInfo::exists(directory));
+        viewer->close();
+    }
+
+    void settingsCapacityPreviewsSizeAndRetentionWithoutSaving() {
+        QTemporaryDir temporary;
+        ViewerEnvironment environment(temporary.path());
+        auto document = replay::loadReplayConfig();
+        document.config.output = "SYNTHETIC-1";
+        replay::saveReplayConfig(document.config, document.original);
+        const QByteArray original = replay::loadReplayConfig().original;
+        const QString directory = replay::replayHistoryDirectory(document.config);
+        FakeRecording service;
+        service.status["running"] = true;
+        service.status["history_directory"] = directory;
+        service.status["max_disk_mib"] = 10240;
+        service.status["min_free_mib"] = 1024;
+        service.status["usage"] = QJsonObject{{"disk_bytes", 8.0 * 1024 * 1024 * 1024}};
+        service.status["storage_forecast"] = QJsonObject{{"state", "ready"}, {"capacity_active_hours", 4.0}, {"warning", "none"},
+            {"bytes_per_active_hour", 2.5 * 1024 * 1024 * 1024}, {"filesystem_free_bytes", 32.0 * 1024 * 1024 * 1024},
+            {"bytes_per_calendar_day", 1024.0 * 1024 * 1024}, {"calendar_sample_days", 8}};
+        auto viewer = replay::createViewer(directory, service.hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(!viewer->property("historyLoading").toBool());
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_I);
+        bool checked = false;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = viewer->findChild<QDialog*>("replaySettings"); QVERIFY(dialog);
+            auto* capacity = dialog->findChild<QLabel*>("settingsStorageCapacity"); QVERIFY(capacity);
+            QVERIFY(capacity->text().contains("4.0 active recording hours"));
+            auto* limit = dialog->findChild<QSpinBox*>("settingMaxDiskMiB");
+            limit->setValue(20480);
+            QVERIFY(capacity->text().contains("8.0 active recording hours"));
+            QVERIFY(capacity->text().contains("About 20.0 days at your observed usage"));
+            QVERIFY(!capacity->text().contains("Save recording"));
+            limit->setValue(10240);
+            QVERIFY(capacity->text().contains("4.0 active recording hours"));
+            auto* free = dialog->findChild<QSpinBox*>("settingMinFreeMiB");
+            free->setValue(40960);
+            QVERIFY(capacity->text().contains("0.0 active recording hours"));
+            QVERIFY(capacity->text().contains("Available disk space reduces this capacity"));
+            free->setValue(1024);
+            QVERIFY(capacity->text().contains("4.0 active recording hours"));
+            auto* retention = dialog->findChild<QSpinBox*>("settingRetentionDays");
+            retention->setValue(14);
+            QVERIFY(capacity->text().contains("14 days would need roughly 14.0 GiB"));
+            auto* interval = dialog->findChild<QDoubleSpinBox*>("settingInterval");
+            interval->setValue(10);
+            QVERIFY(capacity->text().contains("needs its own usage estimate"));
+            interval->setValue(document.config.intervalSeconds);
+            auto* folder = dialog->findChild<QLineEdit*>("settingStorageDirectory");
+            folder->setText(temporary.filePath("other-disk/history"));
+            QVERIFY(!capacity->text().contains("4.0"));
+            folder->setText(directory);
+            QVERIFY(capacity->text().contains("4.0 active recording hours"));
+            checked = true;
+            QTest::keyClick(dialog, Qt::Key_Escape);
+        });
+        viewer->findChild<QPushButton*>("openReplaySettings")->click();
+        QVERIFY(checked);
+        QCOMPARE(replay::loadReplayConfig().original, original);
+        QVERIFY(service.calls().isEmpty());
+        viewer->close();
+    }
+
     void settingsKeyboardCancelAndRetentionReviewPreserveSavedConfig() {
         QTemporaryDir temporary;
         ViewerEnvironment environment(temporary.path());
@@ -312,10 +440,15 @@ private slots:
             QVERIFY(dialog->grab().save("runs/design-review/shared-recording-settings.png"));
             output->setFocus(); output->setCurrentIndex(output->findData("SYNTHETIC-2"));
             auto* days = dialog->findChild<QSpinBox*>("settingRetentionDays"); days->setValue(7);
+            dialog->findChild<QSpinBox*>("settingMaxDiskMiB")->setValue(5120);
+            dialog->findChild<QSpinBox*>("settingMinFreeMiB")->setValue(2048);
             QTimer::singleShot(0, [&] {
                 auto* confirmation = viewer->findChild<QMessageBox*>("confirmShorterRetention");
                 QVERIFY(confirmation); retentionReviewed = true;
                 QVERIFY(confirmation->text().contains("permanently delete"));
+                QVERIFY(confirmation->text().contains("older than 7 days"));
+                QVERIFY(confirmation->text().contains("5120 MiB allowance"));
+                QVERIFY(confirmation->text().contains("2048 MiB free"));
                 QCOMPARE(confirmation->defaultButton(), confirmation->button(QMessageBox::Cancel));
                 QTest::keyClick(confirmation, Qt::Key_Escape);
             });

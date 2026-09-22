@@ -28,8 +28,8 @@ QString configurationAgentPrompt(AgentPromptTopic topic, const AgentPromptContex
         "\"$replay_bin\" outputs\n```\n"
         "daemon paths reports config, history, default_history, state, cache and runtime. Use its current history value for "
         "`\"$replay_bin\" status --dir \"/resolved/history/path\"` to inspect archive counts and lag. "
-        "daemon status separates saved intent (running/paused/stopped), current capture state, indexing pause, errors and worker-limit enforcement. "
-        "For service diagnostics use `systemctl --user status omarchy-replay.service` and "
+        "daemon status separates saved intent (running/paused/stopped), current capture state, indexing pause, errors and worker-limit enforcement. Its storage_forecast estimates how much history the rolling allowance holds from existing usage; Settings previews size changes. "
+        "For an explicitly requested capture investigation, daemon debug --seconds 30 collects bounded field/event counters in memory and then stops. It requires a running coordinator, does not start recording, and creates no resource-history log. For service diagnostics use `systemctl --user status omarchy-replay.service` and "
         "`journalctl --user -u omarchy-replay.service -n 80 --no-pager`.\n\n")
         .arg(context.executable, paths.configFile, context.historyDirectory, paths.historyDirectory,
              paths.stateDirectory, paths.cacheDirectory, paths.runtimeDirectory, shellQuote(context.executable));
@@ -44,7 +44,7 @@ interval_seconds = 5.0 # 0.25–60 seconds between captures.
 [storage]
 directory = "" # Empty uses default history; otherwise an existing absolute local folder.
 retention_days = 30 # Integer 1–3650. Moving capture-age window; expiry deletes history.
-max_disk_mib = 10240 # Integer 64–1048576 MiB. Full archive pauses capture.
+max_disk_mib = 10240 # Integer 64–1048576 MiB. Oldest history rolls out as new moments need room.
 min_free_mib = 1024 # Integer 0–1048576 MiB left free on the selected filesystem.
 
 [indexing]
@@ -73,7 +73,7 @@ preferred = "" # Reserved setting; does not launch or configure an agent yet.
 ```
 CPU values are percentages of one core. Active/idle/request allowances pace OCR cooperatively; pressure takes precedence. The separate ceiling covers the whole OCR worker when systemd/cgroup enforcement is available, not capture or the viewer. Check reported enforcement; more cores alone do not justify a higher setting.
 
-Storage must be an existing empty folder or compatible Replay history owned by this user. Use an absolute path without a trailing slash; network filesystems and a folder that is itself a symlink are unsupported. Switching folders does not move or merge the previous archive. Missing/replaced storage blocks work instead of using the main disk. Retention applies to the selected archive, including pending OCR. Disk allowance, free-space reserve, capture interval and OCR backlog are separate controls. Ask before shortening retention or deleting history.
+Storage must be an existing empty folder or compatible Replay history owned by this user. Use an absolute path without a trailing slash; network filesystems and a folder that is itself a symlink are unsupported. Switching folders does not move or merge the previous archive. Missing/replaced storage blocks work instead of using the main disk. Retention applies to the selected archive, including pending OCR. The archive rolls oldest history out as new moments need room within its allowance and free-space reserve. Maximum age still expires older observations. Disk allowance, free-space reserve, capture interval and OCR backlog are separate controls. Apply only the storage changes the user requests: a smaller allowance, shorter age or larger reserve can permanently remove older history.
 
 An explicit exclusions.apps list replaces configured defaults, so preserve existing entries unless asked to change them. Replay's own window and the Omarchy screensaver (org.omarchy.screensaver) remain excluded even with an empty list. The screensaver and other matching visible windows pause capture of the selected output; closing them allows capture to resume only if recording intent is running and the desktop is ready. Replay's own window is masked without pausing capture. Compositor masks can also affect other screen-sharing apps, even while Replay is stopped. Address-specific masks use a broader app/title guard. Exclusions affect future capture and do not delete old history. Identify app IDs from `hyprctl -j clients` or live status locally; do not guess them from display names.
 

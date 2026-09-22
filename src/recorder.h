@@ -18,6 +18,12 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+class RollingStorageUnavailable : public std::runtime_error {
+public:
+    RollingStorageUnavailable(const QString &reason, bool retry) : std::runtime_error(reason.toStdString()), retryable(retry) {}
+    bool retryable;
+};
+
 struct RecorderOptions {
     QString directory;
     QString codec = "webp";
@@ -42,6 +48,9 @@ struct RecorderOptions {
     // Append to a private archive-first WebP history, creating it when absent.
     // The default remains a finite trial that refuses nonempty directories.
     bool resume = false;
+    // The shared daemon rolls oldest observations out to admit new history.
+    // Finite trials retain their explicit stop-at-limit behavior.
+    bool rollingStorage = false;
     int maxPendingFrames = 16;
     quint64 maxPendingBytes = 64ULL * 1024 * 1024;
 };
@@ -169,6 +178,20 @@ struct HistoryMaintenanceResult {
     bool more = false;
     bool busy = false; // Retry later; earlier committed batches remain valid.
 };
+
+struct HistorySpaceResult {
+    bool ready = false;
+    bool more = false; // A bounded cleanup batch made progress or met a busy writer.
+    QString reason;
+    HistoryMaintenanceResult maintenance;
+};
+
+// Admit at most one image, reclaiming a bounded oldest-first batch if needed.
+// Never removes unrelated files. Rejects oversized admissions before eviction;
+// reclamation includes owned media and incrementally shrinkable index pages.
+HistorySpaceResult makeHistorySpace(const QString &directory, quint64 maxDiskBytes,
+                                   quint64 minFreeBytes, quint64 additionalBytes,
+                                   int maxObservations = 256, int maxFiles = 64);
 
 // Each call deletes a bounded batch. Expiry uses observation capture times;
 // originals shared by surviving observations remain available.

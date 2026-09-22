@@ -20,6 +20,7 @@ The current setup uses `omarchy-replay` for configuration, data, state and the u
 - [Current viewer design](replay-viewer-design.md): the minimal timeline, immediate keyboard preview, OCR highlights, and quick launcher access; redesign implemented and locally verified.
 - [Performance and feasibility plan](omarchy-recall-performance.md): resource requirements, pipeline candidates, and the proposed first proof.
 - [Capture and compression research](omarchy-recall-compression-research.md): historical Rewind evidence and pinned open-source findings.
+- [Storage efficiency options](storage-efficiency-options.md): lossless WebP effort, idle recompression, temporal storage and image-quality tradeoffs; proposed benchmarks.
 - [Run the feasibility prototype](feasibility-prototype.md): build, synthetic demo, native viewer, finite recording, and repeatable checks.
 - [Run a personal trial](personal-trial.md): choose one monitor, collect a finite session with local diagnostics, and bring back useful feedback.
 - [First personal trial review](personal-trial-review-1.md): monitor-choice clarification, the paced OCR deadline failure, and corrections.

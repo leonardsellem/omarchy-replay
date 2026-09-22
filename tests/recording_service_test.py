@@ -101,6 +101,45 @@ def main():
             assert status()['intent'] == 'stopped' and count() == 0
             second = subprocess.run([BINARY, 'daemon', 'run', '--synthetic'], env=env, capture_output=True, timeout=8)
             assert second.returncode != 0 and count() == 0, 'second coordinator acquired shared history'
+            # Explicit debugging is bounded and cannot start capture or leak
+            # private window metadata into its numeric report.
+            debug = call('debug', '--seconds', '1')
+            assert not debug['active'] and debug['capture_attempts'] == 0
+            assert status()['intent'] == 'stopped' and count() == 0
+            call('debug', '--seconds', '0', success=False)
+            abandoned_debug = subprocess.Popen([BINARY, 'daemon', 'debug', '--seconds', '1'],
+                                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                eventually(lambda: call('debug-status').get('active'))
+                abandoned_debug.kill(); abandoned_debug.wait(timeout=3)
+                eventually(lambda: not call('debug-status').get('active'))
+                assert not call('debug-status')['environment']['enabled'], 'abandoned debug session kept monitoring'
+                assert status()['intent'] == 'stopped' and count() == 0
+            finally:
+                if abandoned_debug.poll() is None:
+                    abandoned_debug.kill(); abandoned_debug.wait(timeout=3)
+            # Capture-setting changes reset forecast evidence, including across
+            # restart. A storage-only edit can still project the same rate.
+            config.write_text(valid_config.replace('interval_seconds=0.5', 'interval_seconds=0.75'))
+            call('reload')
+            state_file = root / 'state/omarchy-replay/recording.json'
+            boundary = json.loads(state_file.read_text())['forecast_sample_after_ms']
+            assert boundary > 0 and count() == 0
+            child.terminate(); child.wait(timeout=15); launch()
+            assert json.loads(state_file.read_text())['forecast_sample_after_ms'] == boundary
+            assert status()['intent'] == 'stopped'
+            config.write_text(valid_config.replace('interval_seconds=0.5', 'interval_seconds=0.75').replace('max_disk_mib=64', 'max_disk_mib=128'))
+            call('reload')
+            assert json.loads(state_file.read_text())['forecast_sample_after_ms'] == boundary
+            config.write_text(valid_config); call('reload')
+            desktop(unstable=True)
+            call('start'); retained = count(); attempted = status()['capture_attempts']
+            time.sleep(1.6)
+            snapshot = status()
+            assert count() == retained, 'an unstable desktop retained a screenshot'
+            assert 1 <= snapshot['capture_attempts'] - attempted <= 5, 'unstable capture spun without retry pacing'
+            desktop()
+            eventually(lambda: count() > retained)
             call('start'); eventually(lambda: count() >= 3)
             call('pause'); retained = count(); time.sleep(1.2)
             assert count() == retained and status()['intent'] == 'paused'
@@ -202,6 +241,43 @@ def main():
                 assert db.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == previous_count
             with sqlite3.connect(original_history / 'index.sqlite') as db:
                 assert db.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == original_count
+            # Seed one deliberately large fictional original, then lower the
+            # allowance while paused. Opening/reloading must not evict it, but
+            # resumed capture must roll it out rather than stop at the cap.
+            larger_config = config.read_text().replace('max_disk_mib=64', 'max_disk_mib=128')
+            config.write_text(larger_config); call('reload')
+            assert status()['intent'] == 'paused' and status()['indexing_paused']
+            with sqlite3.connect(history / 'index.sqlite') as db:
+                old_id, old_path = db.execute('SELECT id,path FROM frames ORDER BY timestamp_ms,id LIMIT 1').fetchone()
+                highest_id = db.execute('SELECT MAX(id) FROM frames').fetchone()[0]
+                old_bytes = db.execute('SELECT bytes FROM history_media WHERE path=?', (old_path,)).fetchone()[0]
+                padded_bytes = 72 * 1024 * 1024
+                with (history / old_path).open('r+b') as media:
+                    media.truncate(padded_bytes)
+                db.execute('UPDATE history_media SET bytes=? WHERE path=?', (padded_bytes, old_path))
+                db.execute('UPDATE frames SET source_bytes=? WHERE id=?', (padded_bytes, old_id))
+                db.execute("UPDATE metadata SET value=CAST(value AS INTEGER)+? WHERE key='history_media_bytes'", (padded_bytes-old_bytes,))
+            retained = count()
+            config.write_text(larger_config.replace('max_disk_mib=128', 'max_disk_mib=64')); call('reload')
+            time.sleep(.7)
+            assert count() == retained and status()['intent'] == 'paused', 'smaller cap evicted history or resumed manual pause'
+            assert (history / old_path).exists()
+            resumed_at = status()['retained_this_run']
+            call('resume')
+            eventually(lambda: status()['retained_this_run'] >= resumed_at + 5)
+            call('pause')
+            assert not (history / old_path).exists(), 'oldest original remained after rolling admission'
+            with sqlite3.connect(history / 'index.sqlite') as db:
+                assert not db.execute('SELECT 1 FROM frames WHERE id=?', (old_id,)).fetchone()
+                assert db.execute('SELECT MAX(id) FROM frames').fetchone()[0] > highest_id
+                assert db.execute("SELECT COUNT(*) FROM frames WHERE ocr_state='pending'").fetchone()[0] > 0
+                assert db.execute('SELECT COUNT(*) FROM observations o LEFT JOIN frames f ON f.id=o.frame_id WHERE f.id IS NULL').fetchone()[0] == 0
+            actual_bytes = sum(path.stat().st_size for path in (history / 'media').iterdir())
+            actual_bytes += sum(path.stat().st_size for path in history.glob('index.sqlite*'))
+            assert actual_bytes <= 64 * 1024 * 1024, 'service continued beyond its allowance without reclamation'
+            call('index-resume')
+            eventually(lambda: status()['progress'].get('pending') == 0, 30)
+            assert status()['progress'].get('failed') == 0, 'rollover broke indexing of retained/new history'
             call('stop'); call('shutdown'); child.wait(timeout=15)
             assert child.returncode == 0 and not status()['running']
             with sqlite3.connect(history / 'index.sqlite') as db:

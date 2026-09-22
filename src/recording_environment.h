@@ -73,6 +73,10 @@ public:
     void configure(const EnvironmentOptions &options);
     EnvironmentSnapshot snapshot();
     quint64 generation() const;
+    // Explicit, temporary diagnostics only. No metadata values or history are
+    // emitted. Disabling freezes the counters; enabling starts a fresh sample.
+    void setDiagnosticsEnabled(bool enabled);
+    QJsonObject diagnostics() const;
     // Hash of compositor-provided make/model/serial, or description fallback.
     static QString monitorIdentity(const QJsonObject &monitor);
     static QString validateOptions(const EnvironmentOptions &options);

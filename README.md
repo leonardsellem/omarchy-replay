@@ -58,6 +58,8 @@ Settings live in `~/.config/omarchy-replay/config.toml`. The native Settings dia
 
 You can choose another local disk in Settings. Switching folders leaves the previous archive in place. Replay blocks capture when the selected storage is unavailable; it does not switch to the main disk. Settings’ copied prompts include the resolved paths and installed executable, including XDG overrides.
 
+Storage rolls forward: Replay removes the oldest history as new moments need space, and expires anything older than the selected age. The **I** panel and Settings estimate how much history the chosen allowance can hold. Adjusting the size previews its capacity from your recent usage; calendar-day estimates need at least a week of retained history.
+
 For storage rules, exclusions and the full TOML example, read the [recording and configuration guide](docs/background-recording.md). Earlier installations used the name `oma-rewind`; the installer handles that migration as described in the guide.
 
 ## Use with your coding agent
@@ -84,8 +86,8 @@ pressure_cpu_percent, cpu_ceiling_percent, idle_seconds;
 [service] login_startup; [exclusions] apps; [[exclusions.windows]] app_id,
 title_regex, scope, address, compositor_instance. [agent] preferred is reserved.
 CPU percentages describe one core. An empty storage directory uses the default;
-switching folders leaves the old archive in place. Shortening retention deletes
-expired history. Exclusion app IDs are exact; window matchers in one rule are
+switching folders leaves the old archive in place. Shortening retention or reducing storage can delete
+older history. New moments replace the oldest history as the allowance fills. Exclusion app IDs are exact; window matchers in one rule are
 ANDed, scope is "output", and address rules need compositor_instance plus an app
 or title guard. omarchy-replay and org.omarchy.screensaver remain excluded with an
 empty apps array. Preserve existing entries and unknown keys.

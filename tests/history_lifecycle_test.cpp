@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QPainter>
 #include <QTemporaryDir>
+#include <QStorageInfo>
 #include <iostream>
 #include <sqlite3.h>
 #include <stdexcept>
@@ -240,8 +241,8 @@ void legacyMigrationAndSafety(const QString &root) {
     std::cout << "PASS archive migration and private-media symlink protection\n";
 }
 
-QImage noise(quint32 seed) {
-    QImage result(960, 540, QImage::Format_RGBA8888);
+QImage noise(quint32 seed, QSize size = QSize(960, 540)) {
+    QImage result(size, QImage::Format_RGBA8888);
     for (int row = 0; row < result.height(); ++row) {
         auto *pixels = result.scanLine(row);
         for (int column = 0; column < result.width(); ++column) {
@@ -275,6 +276,114 @@ void diskAccounting(const QString &root) {
     require(resumed.addFrame(image(), 200000).stored, "Reclaimed disk budget could not accept new history"); resumed.finish();
     std::cout << "PASS append enforces total disk limits and retention makes the released budget reusable\n";
 }
+
+void rollingStorage(const QString &root) {
+    constexpr quint64 MiB = 1024 * 1024;
+    auto config = options(root + "/rolling"); config.maxDiskBytes = 16 * MiB; config.rollingStorage = true;
+    qint64 first = 0, latest = 0;
+    {
+        replay::Recorder capture(config);
+        first = capture.addFrame(noise(1), 1000).frameId;
+        require(capture.addFrame(noise(1), 1000).duplicate, "Same-time duplicate fixture did not share its original");
+        for (int i = 2; i <= 14; ++i) {
+            const auto accepted = capture.addFrame(noise(i), i * 1000);
+            require(accepted.stored, "Rolling archive stopped accepting new moments"); latest = accepted.frameId;
+            require(replay::historyUsage(config.directory)["disk_bytes"].toDouble() <= config.maxDiskBytes,
+                    "Rolling admission exceeded its storage allowance");
+        }
+        require(!replay::frameById(config.directory, first) && replay::frameById(config.directory, latest),
+                "Rolling archive did not evict the oldest evidence while preserving new evidence");
+        require(capture.addFrame(noise(14), 15000).duplicate, "Rolling cleanup broke a surviving duplicate reference");
+        const auto beforeOversized = replay::historyUsage(config.directory);
+        bool rejected = false;
+        try { capture.addFrame(noise(15, QSize(2048, 2048)), 16000); }
+        catch (const replay::RollingStorageUnavailable &failure) { rejected = !failure.retryable; }
+        const auto afterOversized = replay::historyUsage(config.directory);
+        require(rejected && beforeOversized["observations"] == afterOversized["observations"] &&
+                beforeOversized["frames"] == afterOversized["frames"] && beforeOversized["media_bytes"] == afterOversized["media_bytes"],
+                "Oversized incoming image reclaimed history before its actual size was known");
+        require(capture.addFrame(image(), 17000).stored, "Rejected oversized image permanently stopped rolling admission");
+        capture.finish();
+    }
+    Connection db(config.directory);
+    require(db.number("SELECT MIN(timestamp_ms) FROM observations") > 1000 &&
+            db.number("SELECT COUNT(*) FROM frames WHERE ocr_state='pending'") > 0 &&
+            db.number("SELECT COUNT(*) FROM history_media WHERE state<>'live'") == 0 &&
+            db.number("SELECT COUNT(*) FROM observations o LEFT JOIN frames f ON f.id=o.frame_id WHERE f.id IS NULL") == 0,
+            "Rolling cleanup left stale queue, media, or observation records");
+    const auto count = db.number("SELECT COUNT(*) FROM observations");
+    const auto oversized = replay::makeHistorySpace(config.directory, config.maxDiskBytes, 0, config.maxDiskBytes);
+    require(!oversized.ready && !oversized.more && db.number("SELECT COUNT(*) FROM observations") == count,
+            "An impossible image erased history before failing");
+    QStorageInfo disk(config.directory); disk.refresh();
+    const auto impossibleReserve = quint64(disk.bytesAvailable()) + config.maxDiskBytes * 4;
+    const auto impossible = replay::makeHistorySpace(config.directory, config.maxDiskBytes, impossibleReserve, MiB);
+    require(!impossible.ready && !impossible.more && db.number("SELECT COUNT(*) FROM observations") == count,
+            "An impossible physical disk reserve erased history");
+    // A bounded batch can remove an observation without deleting a shared
+    // original; subsequent calls continue in timestamp/ID order.
+    const auto sharedConfig = options(root + "/rolling-shared");
+    qint64 shared = 0;
+    { replay::Recorder capture(sharedConfig);
+      shared = capture.addFrame(noise(1), 1000).frameId;
+      capture.addFrame(noise(1), 1000); capture.addFrame(noise(2), 2000); capture.finish(); }
+    const auto before = replay::historyUsage(sharedConfig.directory);
+    const quint64 required = 16 * MiB - quint64(before["disk_bytes"].toDouble()) + MiB;
+    auto step = replay::makeHistorySpace(sharedConfig.directory, 16 * MiB, 0, required, 1, 1);
+    require(!step.ready && step.more && step.maintenance.observationsRemoved == 1 && step.maintenance.filesRemoved == 0 &&
+            replay::frameById(sharedConfig.directory, shared)->observationCount == 1,
+            "Bounded capacity cleanup removed a still-shared original");
+    step = replay::makeHistorySpace(sharedConfig.directory, 16 * MiB, 0, required, 1, 1);
+    require(step.ready && !replay::frameById(sharedConfig.directory, shared) &&
+            replay::historyUsage(sharedConfig.directory)["observations"].toInteger() == 1,
+            "Bounded cleanup did not finish the oldest shared original before newer history");
+    std::cout << "PASS rolling capacity keeps recording, preserves shared references and rejects futile deletion\n";
+}
+
+void rollingIndexShrink(const QString &root) {
+    constexpr quint64 MiB = 1024 * 1024;
+    for (bool legacy : {false, true}) {
+        auto config = options(root + (legacy ? "/legacy-index-limit" : "/rolling-index-limit"));
+        { replay::Recorder capture(config);
+          for (int i = 1; i <= 12; ++i) capture.addFrame(image(i), i * 1000);
+          capture.finish(); }
+        Connection db(config.directory);
+        if (legacy) db.exec("PRAGMA auto_vacuum=NONE; VACUUM");
+        // Simulate a large but supported one-MiB OCR text value for each frame.
+        // Both canonical text and FTS content consume real database pages.
+        db.exec("UPDATE frames SET text=CAST(zeroblob(1048576) AS TEXT),ocr_state='ready';"
+                "INSERT INTO frame_text(rowid,text) SELECT id,text FROM frames; PRAGMA wal_checkpoint(TRUNCATE)");
+        require(QFileInfo(config.directory + "/index.sqlite").size() > 16 * qint64(MiB),
+                "Index shrink fixture did not exceed the smaller allowance");
+        require(db.number("PRAGMA auto_vacuum") == (legacy ? 0 : 2), "Index vacuum fixture has wrong format");
+        replay::HistorySpaceResult result;
+        int attempts = 0;
+        qint64 previousFirst = 0;
+        for (; attempts < 512; ++attempts) {
+            result = replay::makeHistorySpace(config.directory, 16 * MiB, 0, 8 * MiB, 1, 1);
+            require(result.maintenance.observationsRemoved <= 1 && result.maintenance.filesRemoved <= 1,
+                    "Index reclamation exceeded its bounded row/file batches");
+            const auto first = db.number("SELECT COALESCE(MIN(id),0) FROM frames");
+            require(first >= previousFirst, "Index reclamation stopped deleting oldest frames first"); previousFirst = first;
+            if (result.ready || !result.more) break;
+        }
+        if (legacy) {
+            require(!result.ready && !result.more && db.number("SELECT COUNT(*) FROM observations") == 12 &&
+                    result.reason.contains("older history index"),
+                    "Legacy non-shrinkable index was erased or retried indefinitely");
+        } else {
+            require(result.ready && attempts > 1 && db.number("SELECT COUNT(*) FROM observations") > 0 &&
+                    db.number("SELECT MIN(id) FROM frames") > 1 && db.number("SELECT MAX(id) FROM frames") == 12,
+                    "Incremental index pages did not reclaim space while preserving newer history");
+            config.maxDiskBytes = 16 * MiB; config.rollingStorage = true;
+            replay::Recorder capture(config);
+            require(capture.addFrame(image(99), 20000).stored, "Index shrink did not restore rolling recording"); capture.finish();
+            require(replay::historyUsage(config.directory)["disk_bytes"].toDouble() <= config.maxDiskBytes,
+                    "Index shrink resumed above its allowance");
+        }
+    }
+    std::cout << "PASS capacity reduction reclaims index pages incrementally and preserves incompatible legacy indexes\n";
+}
 }
 
 int main(int argc, char **argv) {
@@ -282,7 +391,8 @@ int main(int argc, char **argv) {
     try {
         require(root.isValid(), "Create temporary history test directory");
         sessions(root.path()); retention(root.path()); stableIdsAndLiveDeletion(root.path()); inFlight(root.path());
-        cleanupRecovery(root.path()); legacyMigrationAndSafety(root.path()); diskAccounting(root.path());
+        cleanupRecovery(root.path()); legacyMigrationAndSafety(root.path()); diskAccounting(root.path()); rollingStorage(root.path());
+        rollingIndexShrink(root.path());
     } catch (const std::exception &error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return 0;
 }
