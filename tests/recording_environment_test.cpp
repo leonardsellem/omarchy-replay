@@ -153,6 +153,40 @@ void exclusions() {
     std::cout << "PASS viewer/password exclusion, visibility, cross-display geometry and rule validation\n";
 }
 
+void presetDefaults() {
+    auto observed = ready();
+    replay::RecordingEnvironment environment([&] { return observed; });
+    environment.configure(options());
+    const auto removableDefaults = replay::privacyAppExclusions() + QStringList{"steam", "Steam"};
+    for (const auto &app : removableDefaults) {
+        auto client = window(app);
+        client["initialClass"] = "fixture.changed.id";
+        observed.windows = {client};
+        require(environment.snapshot().reason == "excluded_window", "Default app current class was not excluded");
+        client = window("fixture.changed.id"); client["initialClass"] = app;
+        observed.windows = {client};
+        require(!environment.snapshot().captureAllowed, "Default app initial class was ignored");
+        client = window(app, 2000); observed.windows = {client};
+        require(environment.snapshot().captureAllowed, "Default app on another display paused this output");
+        observed.windows = {window(app + ".fixture")};
+        require(environment.snapshot().captureAllowed, "Default app exclusion matched a longer identifier");
+    }
+    auto allowedApps = replay::gamingAppExclusions() + replay::mediaAppExclusions();
+    allowedApps.removeAll("steam"); allowedApps.removeAll("Steam");
+    allowedApps.append({"fixture.editor", "steam_app_12345", "SteamGame", "orgXgnomeXWorldXSecrets"});
+    for (const auto &app : allowedApps) {
+        observed.windows = {window(app)};
+        require(environment.snapshot().captureAllowed, "Defaults blocked an optional preset, game or unrelated app");
+    }
+    auto config = options(); config.excludedApps.clear();
+    environment.configure(config);
+    for (const auto &app : removableDefaults) {
+        observed.windows = {window(app)};
+        require(environment.snapshot().captureAllowed, "Explicit empty app list did not opt out of a removable default");
+    }
+    std::cout << "PASS privacy/Steam defaults, optional presets, exact identities, display scope and explicit opt-out\n";
+}
+
 void screensaver() {
     auto observed = ready();
     replay::RecordingEnvironment environment([&] { return observed; });
@@ -305,7 +339,7 @@ int main(int argc, char **argv) {
             return result.reason == "ready" || result.reason == "excluded_window" || result.reason == "locked" ||
                 result.reason == "exclusions_unverified" ? 0 : 1;
         }
-        lifecycle(); unknowns(); outputs(); exclusions(); screensaver(); safetyGeneration(); diagnostics(); events();
+        lifecycle(); unknowns(); outputs(); exclusions(); presetDefaults(); screensaver(); safetyGeneration(); diagnostics(); events();
     } catch (const std::exception &error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return 0;
 }

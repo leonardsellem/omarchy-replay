@@ -8,7 +8,7 @@ Find things you saw on your screen. Omarchy Replay records one selected display,
 - Keep recording and indexing in the background with separate controls.
 - Adjust capture rate, retention, storage location and CPU allowances.
 - Pause capture when locked, asleep, or the selected display is unavailable.
-- Exclude apps and windows; Replay and Omarchy's screensaver are always excluded.
+- Exclude apps and windows, with password-manager defaults and optional gaming/media presets.
 - Configure and diagnose Replay with your installed coding agent using copyable prompts.
 
 **Early software for Omarchy and Hyprland.** Recording is off after a fresh installation. Long-session performance and hardware lifecycle behavior still need everyday testing.

@@ -1,6 +1,6 @@
 # Omarchy Replay roadmap
 
-Updated 2026-09-22. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
+Updated 2026-09-23. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
 
 ## Milestones 1–5: implemented locally
 
@@ -10,7 +10,7 @@ Updated 2026-09-22. This records implemented behavior, remaining validation and 
 | 2. Background recorder and configuration | `omarchy-replay.service`, durable running/paused/stopped intent, optional login startup, validated TOML and XDG directories. Fresh installation starts with capture stopped. |
 | 3. Moving retention | Capture-time age window, independent disk/free-space limits, bounded expiry and media cleanup, in-flight indexing protection. The oldest history rolls out as new moments need room within the storage allowance. |
 | 4. Native controls and lifecycle | Super+Alt+R summon/dismiss, recording and indexing controls plus Settings under I, lock/sleep/display/compositor gates and explicit gaps. Temporary conditions never override a manual pause. |
-| 5. Exclusions and deletion | Mandatory Replay masking, default 1Password app identifier, configurable exact app/title rules, visible-window pickers and confirmed delete-recent action. |
+| 5. Exclusions and deletion | Mandatory Replay/screensaver protection, removable privacy and Steam defaults, optional gaming/media presets, exact app/title rules, window pickers and confirmed delete-recent action. |
 
 The service uses lossless archive-first originals independently of OCR backlog. Prefix search, timeline navigation, OCR highlights and matching-line copy remain available. Adaptive OCR keeps the configured active/idle/request/pressure allowances and verified worker-ceiling reporting. OCR memory is released after catch-up. Legacy finite trials keep their existing indexing policies; they do not share the new coordinator's global worker budget.
 
@@ -51,7 +51,9 @@ A full disk allowance rolls out the oldest observations, including those younger
 
 ### Exclusion scope
 
-Replay's viewer and Omarchy's screensaver (`org.omarchy.screensaver`) are always excluded, including with a customized or empty app list. The default app list also includes `com.onepassword.OnePassword`; alternate identities and other password managers require explicit matching and validation. Settings accepts exact app IDs and title regular expressions, plus local visible-window pickers. A particular window can be bound to its compositor instance/address only with an app/title guard; stale rules block capture until corrected.
+Replay's viewer and Omarchy's screensaver (`org.omarchy.screensaver`) are always excluded, including with a customized or empty app list. Removable defaults cover known native password managers, authenticators, key stores and Steam. Existing explicit lists are preserved; games with separate identities, browser extensions and alternate builds may require additional rules. Settings accepts exact app IDs and title regular expressions, plus local visible-window pickers. A particular window can be bound to its compositor instance/address only with an app/title guard; stale rules block capture until corrected.
+
+Settings now offers additive **Passwords & authentication**, **Gaming apps** and **Media players** presets. Only the privacy group and Steam are fresh defaults; other gaming/media apps require an explicit addition. The [inventory](exclusion-presets.md) documents source-verified identities and remaining build coverage limits.
 
 For non-Replay exclusions, a matching potentially visible window pauses the selected output. Compositor `no_screen_share` masks also hide matching pixels before storage/OCR, protecting transitions such as animations and popups. Loaded masks are verified before capture. Unsupported patterns or missing verification block recording. App/title masks for address-bound rules deliberately cover other matching windows too; masks also affect other screen-sharing tools that honor this compositor setting, even while Replay is stopped.
 

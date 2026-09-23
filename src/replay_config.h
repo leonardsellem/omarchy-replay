@@ -1,5 +1,6 @@
 #pragma once
 
+#include "exclusion_presets.h"
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
@@ -31,7 +32,7 @@ struct ReplayConfig {
     double pressureCpuPercent = 10, cpuCeilingPercent = 60;
     int idleSeconds = 60;
     bool loginStartup = false;
-    QStringList excludedApps{"omarchy-replay", "org.omarchy.screensaver", "com.onepassword.OnePassword"};
+    QStringList excludedApps = defaultAppExclusions();
     QVector<WindowExclusion> excludedWindows;
     QString preferredAgent;
 };

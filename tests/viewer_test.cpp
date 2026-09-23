@@ -4,6 +4,7 @@
 #include "index_service.h"
 #include "replay_config.h"
 #include "agent_prompt.h"
+#include "exclusion_presets.h"
 #include "selection_ocr.h"
 
 #include <QApplication>
@@ -31,6 +32,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QPlainTextEdit>
 #include <QPainter>
 #include <QProcess>
 #include <QSlider>
@@ -698,6 +700,130 @@ private slots:
         QCOMPARE(rules.size(), 1);
         QCOMPARE(rules[0].appId, "org.example.SyntheticBrowser"); QCOMPARE(rules[0].address, "0x555");
         QCOMPARE(rules[0].compositorInstance, "synthetic-compositor-instance");
+        viewer->close();
+    }
+
+    void exclusionPresetsMergeOnlyOnRequestAndSaveExplicitly() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        ViewerEnvironment environment(temporary.path());
+        auto document = replay::loadReplayConfig();
+        const auto privacy = replay::privacyAppExclusions();
+        const auto gaming = replay::gamingAppExclusions();
+        const auto media = replay::mediaAppExclusions();
+        QVERIFY(!privacy.isEmpty()); QVERIFY(!gaming.isEmpty()); QVERIFY(!media.isEmpty());
+        for (const auto& app : gaming)
+            QCOMPARE(document.config.excludedApps.contains(app), app == "steam" || app == "Steam");
+        for (const auto& app : media) QVERIFY(!document.config.excludedApps.contains(app));
+        document.config.output = "SYNTHETIC-1";
+        document.config.outputIdentity = "synthetic-display-identity";
+        document.config.intervalSeconds = 4.5;
+        document.config.retentionDays = 45;
+        document.config.activeCpuPercent = 25;
+        document.config.preferredAgent = "synthetic-agent";
+        document.config.excludedApps = {"omarchy-replay", "org.omarchy.screensaver", "org.example.Custom", privacy.first()};
+        document.config.excludedWindows = {{"Private note", "org.example.Editor", {}, "output", {}}};
+        replay::saveReplayConfig(document.config, document.original);
+        {
+            QFile config(replay::replayPaths().configFile); QVERIFY(config.open(QIODevice::Append));
+            QVERIFY(config.write("\n[custom_user_option]\nkeep = \"unchanged\"\n") > 0);
+        }
+        const auto before = replay::loadReplayConfig();
+        FakeRecording service;
+        auto viewer = replay::createViewer(replay::replayPaths().historyDirectory, service.hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(!viewer->property("historyLoading").toBool());
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_I);
+        auto* settings = viewer->findChild<QPushButton*>("openReplaySettings"); QVERIFY(settings);
+        bool inspected = false;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = viewer->findChild<QDialog*>("replaySettings"); QVERIFY(dialog);
+            QTimer::singleShot(15000, dialog, &QDialog::reject);
+            auto* output = dialog->findChild<QComboBox*>("settingOutput"); QVERIFY(output);
+            QTRY_VERIFY(output->findData("SYNTHETIC-1") >= 0);
+            dialog->findChild<QTabWidget*>("settingsTabs")->setCurrentIndex(2);
+            auto* apps = dialog->findChild<QPlainTextEdit*>("settingExcludedApps"); QVERIFY(apps);
+            auto* preset = dialog->findChild<QComboBox*>("exclusionPreset"); QVERIFY(preset);
+            auto* add = dialog->findChild<QPushButton*>("addExclusionPreset"); QVERIFY(add);
+            QCOMPARE(preset->count(), 3);
+            QCOMPARE(apps->toPlainText(), QString("org.example.Custom\n") + privacy.first());
+            apps->setPlainText("  org.example.Custom  \n" + privacy.first() + "\norg.example.Custom\n");
+            QStringList expected{"org.example.Custom", privacy.first()};
+            for (const auto& entry : {qMakePair(QString("privacy"), privacy), qMakePair(QString("gaming"), gaming),
+                                      qMakePair(QString("media"), media)}) {
+                preset->setCurrentIndex(preset->findData(entry.first));
+                const QString beforeClick = apps->toPlainText();
+                QTest::qWait(20); QCOMPARE(apps->toPlainText(), beforeClick);
+                preset->setFocus(); QTest::keyClick(preset, Qt::Key_Tab); QTRY_VERIFY(add->hasFocus());
+                QTest::keyClick(add, Qt::Key_Space);
+                for (const auto& app : entry.second) if (!expected.contains(app)) expected.append(app);
+                QCOMPARE(apps->toPlainText().split('\n'), expected);
+                QTest::keyClick(add, Qt::Key_Space);
+                QCOMPARE(apps->toPlainText().split('\n'), expected);
+                QCOMPARE(replay::loadReplayConfig().original, before.original);
+            }
+            dialog->resize(600, 560); QTest::qWait(60);
+            auto* scroll = dialog->findChild<QScrollArea*>("exclusionSettingsScroll"); QVERIFY(scroll);
+            scroll->ensureWidgetVisible(add);
+            QCOMPARE(scroll->horizontalScrollBar()->maximum(), 0);
+            for (auto* widget : {static_cast<QWidget*>(preset), static_cast<QWidget*>(add)})
+                QVERIFY(scroll->viewport()->rect().contains(QRect(widget->mapTo(scroll->viewport(), QPoint()), widget->size())));
+            QVERIFY(QDir().mkpath("runs/exclusion-presets"));
+            QVERIFY(dialog->grab().save("runs/exclusion-presets/compact.png"));
+
+            // The two always-enforced exclusions also count toward the saved
+            // limit, even though this editor does not display them.
+            QStringList full;
+            for (int i = 0; i < 62; ++i) full.append(QString("org.example.Custom%1").arg(i));
+            const QString fullText = full.join('\n');
+            apps->setPlainText(fullText);
+            preset->setCurrentIndex(preset->findData("media")); add->click();
+            QCOMPARE(apps->toPlainText(), fullText);
+            auto* error = dialog->findChild<QLabel*>("settingsError"); QVERIFY(error);
+            QVERIFY(error->isVisible()); QVERIFY(error->text().contains("64 app exclusions"));
+            QCOMPARE(replay::loadReplayConfig().original, before.original);
+            apps->setPlainText("org.example.Custom"); add->click();
+            QVERIFY(error->isHidden());
+            inspected = true;
+            QTest::keyClick(dialog, Qt::Key_Escape);
+        });
+        settings->click();
+        QVERIFY(inspected);
+        QCOMPARE(replay::loadReplayConfig().original, before.original);
+        QVERIFY(service.calls().isEmpty());
+
+        bool saved = false;
+        QTimer::singleShot(0, [&] {
+            auto* dialog = viewer->findChild<QDialog*>("replaySettings"); QVERIFY(dialog);
+            QTimer::singleShot(15000, dialog, &QDialog::reject);
+            auto* output = dialog->findChild<QComboBox*>("settingOutput"); QVERIFY(output);
+            QTRY_VERIFY(output->findData("SYNTHETIC-1") >= 0);
+            dialog->findChild<QTabWidget*>("settingsTabs")->setCurrentIndex(2);
+            auto* preset = dialog->findChild<QComboBox*>("exclusionPreset"); QVERIFY(preset);
+            preset->setCurrentIndex(preset->findData("gaming"));
+            dialog->findChild<QPushButton*>("addExclusionPreset")->click();
+            QCOMPARE(replay::loadReplayConfig().original, before.original);
+            auto* save = dialog->findChild<QDialogButtonBox*>("settingsButtons")->button(QDialogButtonBox::Save);
+            save->setFocus(); QTest::keyClick(save, Qt::Key_Space); saved = true;
+        });
+        settings->click();
+        QVERIFY(saved);
+        QTRY_COMPARE(service.calls(), QStringList({"reload"}));
+        auto after = replay::loadReplayConfig();
+        auto expected = before.config.excludedApps;
+        for (const auto& app : gaming) if (!expected.contains(app)) expected.append(app);
+        QCOMPARE(after.config.excludedApps, expected);
+        QVERIFY(after.original.contains("[custom_user_option]")); QVERIFY(after.original.contains("unchanged"));
+        // Compare every supported field after restoring the one intended edit.
+        // Separate temporary projections also cover preserved window rules.
+        after.config.excludedApps = before.config.excludedApps;
+        const QString beforePath = temporary.filePath("before.toml"), afterPath = temporary.filePath("after.toml");
+        replay::saveReplayConfig(before.config, {}, beforePath);
+        replay::saveReplayConfig(after.config, {}, afterPath);
+        QFile beforeFile(beforePath), afterFile(afterPath);
+        QVERIFY(beforeFile.open(QIODevice::ReadOnly)); QVERIFY(afterFile.open(QIODevice::ReadOnly));
+        QCOMPARE(afterFile.readAll(), beforeFile.readAll());
         viewer->close();
     }
 

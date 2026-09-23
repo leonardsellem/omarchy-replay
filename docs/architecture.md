@@ -150,9 +150,11 @@ Login startup controls whether systemd starts the coordinator with saved intent.
 
 Replay's own window and Omarchy's screensaver (`org.omarchy.screensaver`) have mandatory compositor masking, independent of the configured app list. The screensaver also pauses capture while potentially visible on the selected output. Closing it clears that exclusion without changing saved intent; capture still requires an active, unlocked session and the other environment checks. OCR can continue while awake. Other configured app/window exclusions pause capture under the same visibility rule. Matching compositor `no_screen_share` rules protect pixels during transitions and window animations. Replay verifies a token for the accepted, loaded rules before native capture. Failed installation or unverified state blocks capture.
 
+Removable defaults cover known password managers, authenticators, key stores and the Steam client. The [preset inventory](exclusion-presets.md) records the exact identities and sources. Matchers use exact current or initial app identities. An explicit `exclusions.apps` array replaces these defaults, including when empty. Settings merges optional gaming/media or privacy presets into its editor, checks the 64-entry limit and writes only on Save. Source defaults and the copied agent reference share `src/exclusion_presets.h`; the compositor installer carries the same fallback list. Game windows and browser extensions with other identities require separate rules.
+
 Those rules also affect other screen-sharing tools that honor them, even while Replay is stopped. Window rules combine nonempty fields with AND; different rules are alternatives. A window address is valid only in its recorded compositor instance and requires an app or title guard. Its compositor mask uses that broader app/title match, so it can hide other matching windows too.
 
-Exclusions affect future capture; they do not remove earlier images. Defaults include the exact app identifier `com.onepassword.OnePassword`. Other builds and password managers need their actual identifiers.
+Exclusions affect future capture; they do not remove earlier images. Additional apps or alternate builds need their actual window identifiers.
 
 ## Controls and recovery
 

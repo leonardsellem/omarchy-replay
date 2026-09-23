@@ -5,6 +5,7 @@ Start with the [repository README](../README.md) for features, installation and 
 ## Current guides
 
 - [Recording and configuration](background-recording.md): display selection, storage, CPU settings, exclusions, keyboard controls and service diagnostics.
+- [App exclusion presets](exclusion-presets.md): privacy defaults, optional gaming/media lists and verified window identifiers.
 - [Coding agent guide](agent-guide.md): supported CLI commands, drop-in operation context, configuration edits, resource tuning and evidence retrieval.
 - [Architecture](architecture.md): process model, archives, OCR/search, CPU scheduling, retention, lifecycle, exclusions and recovery.
 - [Roadmap](roadmap.md): implemented behavior, ordinary-use validation and future work.

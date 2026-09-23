@@ -112,7 +112,7 @@ The default file is `~/.config/omarchy-replay/config.toml`; an absolute `XDG_CON
 | `exclusions.windows` | Window rules | Up to 64 array-of-table rules; fields and matching rules below. |
 | `agent` | `preferred` | Optional string reserved for future agent integration; it does not launch an agent. |
 
-CPU percentages refer to one core, not the whole machine. A larger core count alone does not justify raising them. Defaults for `exclusions.apps` are `omarchy-replay`, `org.omarchy.screensaver` and `com.onepassword.OnePassword`. Replay and Omarchy's screensaver remain excluded independently of that array.
+CPU percentages refer to one core, not the whole machine. A larger core count alone does not justify raising them. Fresh `exclusions.apps` defaults cover Replay, the screensaver, known password managers, authenticators, key stores and the Steam client. The [preset inventory](exclusion-presets.md) lists exact IDs and their evidence. Only Replay and the screensaver remain excluded independently of that array. Settings offers additive privacy, gaming and media presets; gaming and media entries beyond Steam are opt-in. Browser extensions and games with separate IDs need their own rules. Existing explicit arrays keep their contents when defaults change; append requested exclusions without replacing others.
 
 1. Read the resolved TOML file and current status.
 2. Change only settings needed for the user's request. Preserve unknown keys and existing exclusions.

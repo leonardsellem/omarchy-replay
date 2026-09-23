@@ -77,7 +77,9 @@ Calendar estimates require at least seven retained days. A small allowance may n
 
 Replay's own window and Omarchy's screensaver (`org.omarchy.screensaver`) are always excluded, even with a customized or empty app list. Replay's window is masked. The screensaver pauses capture while visible on the recorded display; closing it resumes capture only if recording was running and the session, display and other checks pass. Manual Pause/Stop stays in effect. OCR can continue while the computer is awake.
 
-The default app list also includes `com.onepassword.OnePassword`; other builds or password managers need their actual app identifiers.
+Fresh defaults also exclude known native identities for 1Password, Bitwarden, KeePassXC, Proton Pass, Enpass, QtPass, GNOME Secrets, GNOME Authenticator, OTPClient, Yubico Authenticator, Seahorse and the Steam client. These entries are removable. See the [preset inventory](exclusion-presets.md) for exact IDs, sources and build limitations. Browser extensions use their browser's identity and are not covered by these native-app entries.
+
+An existing explicit app list stays as saved when defaults change. Under **Settings → Exclusions**, select **Passwords & authentication**, **Gaming apps** or **Media players**, then choose **Add preset** and **Save**. Presets append missing IDs and preserve your other entries. Cancel leaves the file unchanged. Gaming and media presets are optional; launcher exclusions do not cover every game.
 
 In Exclusions, **Choose visible app…** and **Choose visible window…** fill in current desktop identifiers when available. An app exclusion is the simplest way to keep all windows of that app out of future captures. For more specific rules, use a window title pattern or **Copy exclusions prompt** and describe the rule to your coding agent.
 
@@ -126,10 +128,12 @@ idle_seconds = 60
 login_startup = false
 
 [exclusions]
-apps = ["omarchy-replay", "org.omarchy.screensaver", "com.onepassword.OnePassword"]
+# Omit apps to use the fresh defaults listed in exclusion-presets.md.
+# To supply your own list, uncomment and edit; it replaces the defaults.
+# apps = ["example.private-app"]
 ```
 
-An explicit `apps` list replaces configured defaults. Replay's mandatory self-exclusion is enforced separately. Saved `recording.output_identity` is maintained after display verification. An address rule also stores `compositor_instance`.
+An explicit `apps` list replaces configured defaults. Replay and screensaver exclusions are enforced separately. Saved `recording.output_identity` is maintained after display verification. An address rule also stores `compositor_instance`.
 
 The parser validates types, ranges and window patterns. Native writes preserve unknown TOML values and refuse to overwrite a concurrent edit. Unknown extension fields in a window rule may require direct editing when the native editor cannot preserve their meaning.
 

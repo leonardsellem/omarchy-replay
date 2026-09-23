@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic configuration transactions; never mutates the desktop."""
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -65,6 +66,32 @@ class CaptureExclusionsTest(unittest.TestCase):
         self.assertEqual(installer.title_pattern(r'[$]\$\Q$\E'), r'(?s:.*)(?:[$]\$\Q$\E)(?s:.*)')
         self.assertEqual(installer.title_pattern('[]$][^]$][[:alpha:]$]$'),
                          r'(?s:.*)(?:[]$][^]$][[:alpha:]$](?:\n?$))(?s:.*)')
+
+    def test_defaults_use_exact_masks_and_explicit_apps_can_opt_out(self):
+        mandatory = {'omarchy-replay', 'org.omarchy.screensaver'}
+        removable = set(installer.DEFAULT_APPS) - mandatory
+        for source in ('', '[exclusions]\n'):
+            self.policy.write_text(source)
+            policy, _ = installer.read_policy(self.policy)
+            rule = installer.render_rules(policy)[0].decode()
+            self.assertIn('com.belmoussaoui.Authenticator', policy['apps'])
+            self.assertIn('Bitwarden', policy['apps'])
+            for app in installer.DEFAULT_APPS:
+                self.assertIn(app, policy['apps'])
+                literal = re.escape(app).replace(r'\ ', ' ').replace(r'\-', '-').replace('\\', '\\092')
+                for field in ('class', 'initial_class'):
+                    self.assertEqual(rule.count('  match = { ' + field + ' = "^' + literal + '$" },\n'), 1)
+            for optional in ('net.lutris.Lutris', 'heroic', 'com.libretro.RetroArch',
+                             'com.moonlight_stream.Moonlight', 'mpv', 'vlc'):
+                self.assertNotIn(optional, policy['apps'])
+        for apps in ('[]', '["fixture.editor"]'):
+            self.policy.write_text('[exclusions]\napps=' + apps + '\n')
+            policy, _ = installer.read_policy(self.policy)
+            rule = installer.render_rules(policy)[0].decode()
+            self.assertEqual(set(policy['apps']), mandatory | ({'fixture.editor'} if apps != '[]' else set()))
+            for app in removable:
+                self.assertNotIn(app, policy['apps'])
+            self.assertEqual(rule.count('no_screen_share = true'), len(policy['apps']) * 2)
 
     def test_screensaver_masks_cannot_be_removed_by_custom_apps(self):
         for apps in ('[]', '["fixture.editor"]', '["org.omarchy.screensaver"]'):

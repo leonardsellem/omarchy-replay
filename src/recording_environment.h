@@ -15,7 +15,7 @@ struct EnvironmentOptions {
     // Persist the first accepted identity with the recording configuration.
     // An empty identity is pinned to the first verified selected output.
     QString outputIdentity;
-    QStringList excludedApps{"omarchy-replay", "org.omarchy.screensaver", "com.onepassword.OnePassword"};
+    QStringList excludedApps = defaultAppExclusions();
     QVector<WindowExclusion> excludedWindows;
     // Successful compositor installer receipt; verified again before retention.
     QString exclusionMaskToken;

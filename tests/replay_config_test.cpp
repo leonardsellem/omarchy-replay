@@ -49,10 +49,35 @@ private slots:
         QVERIFY(!document.exists); QVERIFY(document.original.isEmpty());
         QCOMPARE(document.config.retentionDays, 30); QCOMPARE(document.config.cpuCeilingPercent, 60.);
         QVERIFY(document.config.output.isEmpty()); QVERIFY(!document.config.loginStartup);
-        QCOMPARE(document.config.excludedApps, QStringList({"omarchy-replay", "org.omarchy.screensaver", "com.onepassword.OnePassword"}));
+        QCOMPARE(document.config.excludedApps, replay::defaultAppExclusions());
         QCOMPARE(QDir(directory.path()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0);
         environment.set("XDG_CONFIG_HOME", "relative-is-not-xdg");
         QCOMPARE(replay::replayPaths().configFile, QDir::homePath() + "/.config/omarchy-replay/config.toml");
+    }
+
+    void exclusionDefaultsRespectExplicitAppLists() {
+        QTemporaryDir directory;
+        const QString path = directory.filePath("config.toml");
+        for (const auto &source : {QByteArray(), QByteArray("[exclusions]\n")}) {
+            write(path, source);
+            const auto config = replay::loadReplayConfig(path).config;
+            for (const auto &app : replay::privacyAppExclusions())
+                QVERIFY2(config.excludedApps.contains(app), qPrintable(app));
+            QVERIFY(config.excludedApps.contains("steam"));
+            QVERIFY(config.excludedApps.contains("Steam"));
+            auto optionalApps = replay::gamingAppExclusions() + replay::mediaAppExclusions();
+            optionalApps.removeAll("steam"); optionalApps.removeAll("Steam");
+            for (const auto &app : optionalApps)
+                QVERIFY2(!config.excludedApps.contains(app), qPrintable(app));
+        }
+        for (const auto &apps : {QByteArray("[]"), QByteArray("['fixture.editor']")}) {
+            write(path, "[exclusions]\napps=" + apps + "\n");
+            const auto document = replay::loadReplayConfig(path);
+            const QStringList expected = apps == "[]" ? QStringList() : QStringList{"fixture.editor"};
+            QCOMPARE(document.config.excludedApps, expected);
+            replay::saveReplayConfig(document.config, document.original, path);
+            QCOMPARE(replay::loadReplayConfig(path).config.excludedApps, expected);
+        }
     }
 
     void realTomlAndUnknownValuesSurviveSave() {

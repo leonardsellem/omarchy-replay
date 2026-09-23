@@ -16,7 +16,16 @@ from install_viewer_exclusion import atomic_write, backup, hyprctl, lua_string
 BEGIN = '-- BEGIN Omarchy Replay capture exclusions'
 END = '-- END Omarchy Replay capture exclusions'
 PREFIX = '-- Managed by Omarchy Replay: capture exclusions\n'
-DEFAULT_APPS = ['omarchy-replay', 'org.omarchy.screensaver', 'com.onepassword.OnePassword']
+# Keep aligned with defaultAppExclusions() in src/exclusion_presets.h.
+DEFAULT_APPS = [
+    'omarchy-replay', 'org.omarchy.screensaver',
+    'com.onepassword.OnePassword', '1password', '1Password',
+    'Bitwarden', 'bitwarden', 'KeePassXC', 'org.keepassxc.KeePassXC',
+    'Proton Pass', 'Enpass', 'QtPass', 'qtpass', 'org.gnome.World.Secrets',
+    'com.belmoussaoui.Authenticator', 'com.github.paolostivanin.OTPClient',
+    'com.yubico.yubioath', 'org.gnome.Seahorse', 'seahorse', 'Seahorse',
+    'steam', 'Steam',
+]
 MAX_CONFIG = 256 * 1024
 
 

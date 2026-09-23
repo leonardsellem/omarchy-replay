@@ -1,5 +1,6 @@
 #include "viewer.h"
 #include "agent_prompt.h"
+#include "exclusion_presets.h"
 #include "recorder.h"
 #include "index_service.h"
 #include "replay_config.h"
@@ -770,6 +771,37 @@ public:
             bool accepted = false;
             const QString selected = chooseItem(this, "Exclude an app", "Pause capture whenever this app is visible", names, accepted);
             if (accepted && !apps_->toPlainText().split('\n').contains(selected)) apps_->appendPlainText(selected);
+        });
+        auto* presetRow = new QHBoxLayout;
+        auto* preset = new QComboBox;
+        preset->setObjectName("exclusionPreset"); preset->setAccessibleName("App exclusion preset");
+        preset->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        preset->setMinimumContentsLength(22);
+        preset->addItem("Passwords & authentication", "privacy");
+        preset->addItem("Gaming apps", "gaming");
+        preset->addItem("Media players", "media");
+        auto* addPreset = new QPushButton("Add preset");
+        addPreset->setObjectName("addExclusionPreset"); addPreset->setAutoDefault(false);
+        presetRow->addWidget(preset, 1); presetRow->addWidget(addPreset);
+        exclusionLayout->addLayout(presetRow);
+        exclusionLayout->addWidget(note("Adds to your list. Save to apply. Gaming apps do not cover every game."));
+        connect(addPreset, &QPushButton::clicked, this, [this, preset] {
+            const QString id = preset->currentData().toString();
+            const QStringList additions = id == "privacy" ? privacyAppExclusions()
+                : id == "gaming" ? gamingAppExclusions() : mediaAppExclusions();
+            QStringList merged;
+            for (const auto& line : apps_->toPlainText().split('\n')) {
+                const QString app = line.trimmed();
+                if (!app.isEmpty() && !merged.contains(app)) merged.append(app);
+            }
+            for (const auto& app : additions) if (!merged.contains(app)) merged.append(app);
+            auto saved = merged;
+            for (const QString& required : {"omarchy-replay", "org.omarchy.screensaver"})
+                if (!saved.contains(required)) saved.append(required);
+            const QString limitError = "This preset would exceed the limit of 64 app exclusions, including Replay and the screensaver. Remove some entries before adding it.";
+            if (saved.size() > 64) { showError(limitError); return; }
+            apps_->setPlainText(merged.join('\n'));
+            if (error_->text() == limitError) showError({});
         });
         section(exclusionLayout, "Window rules");
         exclusionLayout->addWidget(note("All filled fields must match. Title patterns use regular expressions."));
