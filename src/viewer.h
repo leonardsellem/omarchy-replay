@@ -1,5 +1,7 @@
 #pragma once
 
+#include "selection_ocr.h"
+
 #include <QString>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -19,6 +21,8 @@ struct ViewerServiceHooks {
     std::function<QJsonObject(const QString&, const QJsonObject&)> recordingControl;
     // Bounded, read-only display metadata. Injected in synthetic UI tests.
     std::function<QJsonArray()> displays;
+    // Runs off the GUI thread; synthetic tests can control completion/cancellation.
+    std::function<SelectionOcrResult(const QImage&, const std::shared_ptr<std::atomic_bool>&)> selectionOcr;
 };
 std::unique_ptr<QWidget> createViewer(const QString& datasetDirectory, ViewerServiceHooks services = {});
 int showViewer(const QString& datasetDirectory);

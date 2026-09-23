@@ -1,6 +1,6 @@
 # Omarchy Replay roadmap
 
-Updated 2026-09-20. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
+Updated 2026-09-22. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
 
 ## Milestones 1–5: implemented locally
 
@@ -68,6 +68,14 @@ Exclusions apply to future captures. Existing history changes only through reten
 | Control socket and process lock | `$XDG_RUNTIME_DIR/omarchy-replay/` |
 
 Absolute XDG overrides are respected. `[storage].directory` can select a folder on another mounted local disk. Switching folders keeps the previous archive in place; a missing disk pauses capture and indexing until the same history returns. The installer migrates the earlier `oma-rewind` directories without merging archives. See [architecture](architecture.md#storage-location-and-configuration) for details. Settings and TOML share one validation model. Writes are private/atomic and preserve unknown values; conflicting concurrent edits are rejected. A bad edit leaves the last valid configuration in use, including after restart. Settings includes display selection, the visible history path and Open folder, plus copyable prompts for setup, exclusions and resource tuning. The main viewer opens centered and floating, with text controls. Preferred-agent configuration is reserved; it does not yet invoke an agent.
+
+## Viewer text selection: implemented locally
+
+Drag over a saved image and release to recognize and copy the selected text. **S** starts keyboard selection outside search; arrows move it, **Shift+arrows** resize it, **Enter** submits it and **Esc** cancels it. Selection maps through fit, original-size and scrolled views to the original pixels. It works before indexing without changing archive OCR state; existing copy shortcuts remain available.
+
+One bounded, asynchronous OCR job runs per viewer. Navigation, replacement selection and closure cancel stale work. Empty/error/canceled results and results superseded by a newer clipboard change do not overwrite the clipboard. Recognition uses local Tesseract and a memory pipe, with no live desktop recapture or temporary image file. It has its own short-lived resource limits, separate from background indexing.
+
+Synthetic backend and native Qt viewer checks pass, including original-pixel mapping, real crop OCR, cancellation and clipboard protection; see [area text selection](replay-viewer-design.md#area-text-selection-2026-09-22) for evidence and limits. Ordinary-use validation and agent-assisted recall remain the next roadmap priorities.
 
 ## Agent-assisted recall using the user's coding agents
 

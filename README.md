@@ -4,6 +4,7 @@ Find things you saw on your screen. Omarchy Replay records one selected display,
 
 - Search visible text, including partial words as you type.
 - Browse moments with the keyboard and copy highlighted OCR lines.
+- Drag over a saved image to recognize and copy text from that area.
 - Keep recording and indexing in the background with separate controls.
 - Adjust capture rate, retention, storage location and CPU allowances.
 - Pause capture when locked, asleep, or the selected display is unavailable.
@@ -39,9 +40,12 @@ Replace the placeholder; it is not an executable name. The launcher command supp
 | Up / Down or K / J | Previous / next match. |
 | Left / Right or H / L | Previous / next moment. |
 | Ctrl+C | Copy matching OCR lines; copy all recognized text when no search is active. |
+| S | Start keyboard text selection outside search. Arrows move it; Shift+arrows resize it; Enter copies. |
 | I | Open recording controls and settings. |
 | ? | Show all shortcuts. |
-| Esc | Leave the focused control or open panel; close the viewer when nothing remains focused. |
+| Esc | Cancel text selection first; otherwise leave the focused control or open panel, then close the neutral viewer. |
+
+To copy part of a screen, drag a rectangle over the saved image and release. Replay reads that area locally and copies its text, even if the image has not been indexed. A short message confirms the result. Empty or failed recognition leaves your clipboard unchanged.
 
 ## Configure
 

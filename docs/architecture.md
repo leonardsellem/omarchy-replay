@@ -68,6 +68,14 @@ The viewer pages results chronologically and puts matches on the timeline. Selec
 
 An OCR miss is not proof that information never appeared. Small text, unusual layouts and low contrast can reduce recall. Sampling also misses content that appears entirely between capture ticks.
 
+### On-demand selection OCR
+
+Dragging over the saved image maps the preview rectangle back to original-image coordinates, including fit scaling and scroll position. On release, the viewer crops the original pixels and recognizes that area asynchronously. Keyboard selection follows the same path. It works before archive indexing and writes neither OCR text nor geometry back to the archive.
+
+Each viewer runs at most one short-lived Tesseract child for selection OCR. Replacing a selection, navigating away or closing the viewer cancels obsolete work. Before copying, the viewer checks that the result still belongs to the selected image and latest request; a newer clipboard change prevents an older result from overwriting it. Empty, failed and canceled results leave the clipboard intact. These checks are separate from the existing stored-line copy shortcuts.
+
+The crop travels through a bounded memory pipe, without a temporary image file. The child uses one OpenMP thread, nice level 10 and a 10-second wall timeout. Crops are limited to 32 × 1024² pixels and 16,384 pixels per dimension. Recognition follows Omarchy's text-capture settings: a single text block, LSTM recognition, 300 DPI and preserved interword spaces. It uses the installed language data selected by `OMARCHY_OCR_LANGS`, falling back to `eng` when unset or empty. This requested work is separate from the background indexer's CPU allowances and worker ceiling. It runs only after a selection is submitted, with no continuous hover processing.
+
 ## CPU scheduling
 
 Capture and OCR have different costs. Capture acquires, hashes and compresses pixels. OCR decodes originals, plans changes and recognizes text. A lower OCR allowance delays that work; it does not remove its total CPU cost.
@@ -178,7 +186,8 @@ Current limits include one selected display, local storage, imperfect OCR and sa
 | `src/index_scheduler.cpp`, `src/work_budget.cpp` | Adaptive policy and cooperative pacing. |
 | `src/index_resources.cpp` | Managed worker lifecycle and verified limits. |
 | `src/replay_config.cpp` | Paths, TOML validation and atomic settings writes. |
-| `src/viewer.cpp` | Search, timeline, images, controls and settings. |
+| `src/viewer.cpp` | Search, timeline, image selection, clipboard ownership, controls and settings. |
+| `src/selection_ocr.cpp` | Bounded, cancelable OCR of an in-memory image crop. |
 | `src/agent_prompt.cpp` | Self-contained agent prompts for the installed app. |
 | `scripts/install_recording_service.py` | Local service, launcher and shortcut installation. |
 | `scripts/install_capture_exclusions.py` | Managed compositor capture masks. |

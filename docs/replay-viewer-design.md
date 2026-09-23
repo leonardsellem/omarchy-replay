@@ -1,6 +1,6 @@
 # Replay viewer: timeline and recall
 
-Updated: 2026-09-22. Status: timeline, prefix search and controls/settings refinement implemented. Dated verification notes appear below. This records interface behavior, not an all-day performance or reliability result.
+Updated: 2026-09-22. Status: timeline, prefix search, controls/settings refinement and area text selection implemented locally. Dated verification notes appear below. This records interface behavior, not an all-day performance or reliability result.
 
 ## The shape of the viewer
 
@@ -24,7 +24,8 @@ Open **Omarchy Replay** from the app launcher, or use **Super+Alt+R** when its s
 | `Home` / `End` | First / latest saved moment. |
 | `F` | Fit the recorded screen in the preview. |
 | `1` | Show the image at actual size. |
-| `Shift` + arrow keys | Pan the image at actual size. |
+| `Shift` + arrow keys | Pan the image at actual size when no text selection is active. |
+| `S` | Start keyboard text selection outside search. Arrows move the rectangle; Shift+arrows resize it; Enter submits it for recognition and copy. |
 | `Tab` / `Shift+Tab` | Move keyboard focus between controls. |
 | `Ctrl+C` | Copy matching OCR lines while searching; all recognized screen text without a query. Inside the search field, copy selected query text normally. |
 | `Ctrl+Shift+C` | Copy all recognized screen text outside the search field. |
@@ -34,7 +35,7 @@ Open **Omarchy Replay** from the app launcher, or use **Super+Alt+R** when its s
 | `Page Up` / `Page Down` | Previous / next page of matches. |
 | `P` | Request indexing for the selected moment and nearby saved moments. |
 | `C` | Request two minutes of indexing catch-up. |
-| `Esc` | Leave the search field or another focused control, or dismiss an open panel. From the neutral viewer, close Replay. |
+| `Esc` | Cancel text selection or its pending recognition first. Otherwise leave a focused control or open panel; from the neutral viewer, close Replay. |
 
 Letter shortcuts do not replace ordinary typing in the search field. Esc leaves the query intact and moves focus to the viewer, where arrows and letter shortcuts work immediately. A subsequent Esc closes it when no panel or control has focus. The timeline also supports direct pointer scrubbing. No Enter step is needed to inspect a selected result.
 
@@ -49,6 +50,16 @@ Copying a search match uses the same stored lines and matching rules as the visi
 Search completes the final word once it has at least three characters: `contin` finds `continue`, `continuous`, and `continuity`. Earlier words remain complete-word constraints; one- and two-character final words remain exact. Search and line highlights share the same case/accent/token rules. This is prefix completion, not edit-distance typo correction or natural-language answering.
 
 Matches are chronological. The viewer loads 100 at a time; Up/Down continues across page boundaries, so the first page is not a result ceiling. The count covers every indexed match. Timeline marks span all matching history, with at most 1,000 representative marks for dense results; clicking a mark loads its matching page. Unprocessed images remain outside text search until OCR finishes.
+
+## Copy text from an area
+
+Drag a rectangle over the saved screen with the left mouse button and release to recognize and copy that area's text. The selection uses the original image resolution, whether the preview is fitted, at actual size or scrolled. A short status shows recognition and then its result. The saved image can still be awaiting indexing; selecting it does not change archive text, highlights or indexing state.
+
+For keyboard selection, leave search and press **S**. Arrow keys move the rectangle, **Shift+arrows** resize it, and **Enter** submits it. **Esc** cancels the selection or recognition. Moving focus away cancels an unsubmitted keyboard selection; resizing the preview cancels an unfinished rectangle. Existing **Ctrl+C** and **Ctrl+Shift+C** retain their stored-text behavior.
+
+Only the latest valid selection can copy. A replacement selection, navigation or viewer closure cancels stale work, and a newer clipboard change prevents a late result from overwriting it. Empty, failed and canceled results leave the clipboard unchanged. OCR can misread characters or reading order; select a smaller text block when needed.
+
+Selection runs one bounded local OCR job per viewer, only when submitted. It performs no hover recognition, archive writes or remote requests. The [architecture](architecture.md#on-demand-selection-ocr) describes its limits and its separate CPU policy.
 
 ## Indexing and current limits
 
@@ -97,3 +108,11 @@ Settings groups capture, history limits and storage location; Resources separate
 The change preserves configuration keys, capture/indexing intent, storage forecast calculations and copy-agent prompts. Disclosure controls support Tab and Space, including at compact sizes. Verification uses synthetic history and fake service responses; it does not inspect personal recordings or change the running coordinator.
 
 The Release build, including the button-affordance follow-up, passed 31 CTest suites; two opt-in native service suites were skipped (88.49 seconds total). Tests verify collapsed defaults, Tab/Space disclosure, horizontal containment, compact scrolling, persistent Save/Cancel access, visible errors and clipboard notices, and unchanged saved configuration. Synthetic visual inspection covered Controls at 1440×920 and 900×620 and Settings at 740×740 and 600×560, including selected, focused and disabled buttons. Local screenshots are under ignored `runs/panel-clarity/`; the latest regression log is `runs/button-affordance-tests.log`.
+
+## Area text selection, 2026-09-22
+
+The Release build passed 32 CTest suites, with two opt-in native service suites skipped (188.39 seconds). The new backend checks cover real synthetic crop recognition, blank output, language/settings arguments, missing Tesseract, errors, output bounds, cancellation, child cleanup and the timeout.
+
+Native Qt viewer tests exercise reverse/clamped dragging, fitted and scrolled original-size coordinates, exact crop pixels, keyboard selection, focus/resize cancellation, closing during recognition, clipboard changes and serialized replacement requests. A full interaction with the real OCR backend copied only the selected synthetic text at 1440×920 and 900×620. Pending frame state and the text index stayed unchanged. Synthetic screenshots of selection, recognition and copy feedback were visually inspected; local artifacts are under ignored `runs/selection-ocr/`, and the regression log is `runs/selection-ocr-regression.log`.
+
+These checks use synthetic history and an isolated Qt clipboard. They do not establish OCR accuracy for every personal screen, real compositor clipboard interoperability or a sustained power/CPU result. The installed launcher resolves to the updated build; reopening the viewer loads the feature without restarting recording.

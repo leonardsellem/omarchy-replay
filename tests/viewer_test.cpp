@@ -4,6 +4,7 @@
 #include "index_service.h"
 #include "replay_config.h"
 #include "agent_prompt.h"
+#include "selection_ocr.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -17,6 +18,7 @@
 #include <QInputDialog>
 #include <QTabWidget>
 #include <QMutex>
+#include <QWaitCondition>
 #include <QThread>
 #include <QTimer>
 #include <QDir>
@@ -34,13 +36,17 @@
 #include <QSlider>
 #include <QScrollBar>
 #include <QScrollArea>
+#include <QScopeGuard>
 #include <QJsonDocument>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QWidget>
 #include <sqlite3.h>
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <unistd.h>
@@ -84,6 +90,45 @@ struct FakeRecording {
                 QJsonObject{{"name", "SYNTHETIC-2"}, {"model", "Second fixture display"}, {"width", 2560}, {"height", 1440}}}; }};
     }
     QStringList calls() { QMutexLocker guard(&mutex); return actions; }
+};
+
+struct SelectionOcrProbe : std::enable_shared_from_this<SelectionOcrProbe> {
+    QMutex mutex;
+    QWaitCondition changed;
+    QVector<QImage> crops;
+    QVector<std::shared_ptr<std::atomic_bool>> cancellations;
+    QVector<replay::SelectionOcrResult> replies;
+    int released = 0, active = 0, peak = 0;
+    bool usedGuiThread = false, honorCancellation = false;
+    replay::ViewerServiceHooks hooks() {
+        replay::ViewerServiceHooks result;
+        result.selectionOcr = [self = shared_from_this()](const QImage& image, const std::shared_ptr<std::atomic_bool>& cancelled) {
+            QMutexLocker guard(&self->mutex);
+            const int call = self->crops.size();
+            self->crops.append(image); self->cancellations.append(cancelled);
+            self->usedGuiThread |= QThread::currentThread() == qApp->thread();
+            self->peak = std::max(self->peak, ++self->active);
+            // Deliberately return success even after cancellation. The viewer
+            // must reject stale results independently of backend cooperation.
+            QElapsedTimer deadline; deadline.start();
+            while (call >= self->released && deadline.elapsed() < 5000 &&
+                   !(self->honorCancellation && cancelled && cancelled->load()))
+                self->changed.wait(&self->mutex, 20);
+            --self->active;
+            if (self->honorCancellation && cancelled && cancelled->load())
+                return replay::SelectionOcrResult{{}, {}, true};
+            return call < self->replies.size() ? self->replies[call]
+                : replay::SelectionOcrResult{QString("Selected text %1").arg(call + 1), {}, false};
+        };
+        return result;
+    }
+    void release(int count) { QMutexLocker guard(&mutex); released = count; changed.wakeAll(); }
+    void cooperateWithCancellation() { QMutexLocker guard(&mutex); honorCancellation = true; }
+    int count() { QMutexLocker guard(&mutex); return crops.size(); }
+    QImage crop(int call) { QMutexLocker guard(&mutex); return crops.value(call); }
+    bool cancelled(int call) { QMutexLocker guard(&mutex); return call < cancellations.size() && cancellations[call]->load(); }
+    int maximumActive() { QMutexLocker guard(&mutex); return peak; }
+    bool onGuiThread() { QMutexLocker guard(&mutex); return usedGuiThread; }
 };
 }
 
@@ -137,6 +182,20 @@ class ViewerTest final : public QObject {
         painter.drawText(QRect(80, 454, 1120, 50), Qt::AlignVCenter,
                          "The text and coordinates below are deterministic test data.");
         return image;
+    }
+
+    static void moveTextSelection(QWidget* canvas, const QPoint& point) {
+        QMouseEvent move(QEvent::MouseMove, QPointF(point), QPointF(canvas->mapToGlobal(point)),
+                         Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(canvas, &move);
+    }
+
+    static QRect dragTextSelection(QWidget* canvas, const QPoint& from, const QPoint& to) {
+        QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, from);
+        moveTextSelection(canvas, to);
+        const QRect selection = canvas->property("textSelectionRect").toRect();
+        QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, to);
+        return selection;
     }
 
     static bool indexText(const QString& directory, qint64 id, const QString& text,
@@ -1193,6 +1252,306 @@ private slots:
         clipboard->setText("copy all without a query");
         QTest::keyClick(viewer.get(), Qt::Key_C, Qt::ControlModifier);
         QCOMPARE(clipboard->text(), withoutGeometry);
+        viewer->close();
+    }
+
+    void dragSelectionUsesOriginalPixelsAndLeavesPendingHistoryUntouched() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        ViewerEnvironment environment(temporary.path());
+        replay::RecorderOptions options;
+        options.directory = temporary.filePath("selection-history");
+        options.deferredOcr = true; options.minFreeBytes = 0;
+        const QImage source = prefixScreen("Only the selected text is copied", 1);
+        qint64 id;
+        { replay::Recorder recorder(options); id = recorder.addFrame(source, 1000).frameId; recorder.finish(); }
+        auto probe = std::make_shared<SelectionOcrProbe>();
+        auto viewer = replay::createViewer(options.directory, probe->hooks());
+        viewer->resize(960, 720); viewer->show(); viewer->activateWindow();
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), id);
+        auto* canvas = viewer->findChild<QWidget*>("recordedImage"); QVERIFY(canvas);
+        auto* evidence = viewer->findChild<QScrollArea*>("evidenceView"); QVERIFY(evidence);
+        auto* clipboard = QApplication::clipboard();
+        clipboard->setText("keep until selected text is ready");
+        QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, canvas->rect().center());
+        QTest::qWait(40); QCOMPARE(probe->count(), 0);
+        const QPoint from(canvas->width() * 3 / 4, canvas->height() * 3 / 4);
+        const QPoint to(canvas->width() / 4, canvas->height() / 4);
+        QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, from);
+        moveTextSelection(canvas, to);
+        QVERIFY(canvas->property("textSelectionActive").toBool());
+        const QRect fitSelection = canvas->property("textSelectionRect").toRect();
+        QVERIFY(qAbs(fitSelection.left() - source.width() / 4) <= 2);
+        QVERIFY(qAbs(fitSelection.top() - source.height() / 4) <= 2);
+        QVERIFY(qAbs(fitSelection.width() - source.width() / 2) <= 3);
+        QVERIFY(qAbs(fitSelection.height() - source.height() / 2) <= 3);
+        QVERIFY(QDir().mkpath("runs/selection-ocr"));
+        QVERIFY(viewer->grab().save("runs/selection-ocr/selecting.png"));
+        QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, to);
+        QTRY_COMPARE(probe->count(), 1);
+        QVERIFY(viewer->property("selectionOcrRunning").toBool());
+        QCOMPARE(clipboard->text(), QString("keep until selected text is ready"));
+        QCOMPARE(probe->crop(0).convertToFormat(QImage::Format_RGBA8888), source.copy(fitSelection).convertToFormat(QImage::Format_RGBA8888));
+        QVERIFY(viewer->grab().save("runs/selection-ocr/reading.png"));
+        probe->release(1);
+        QTRY_COMPARE(clipboard->text(), QString("Selected text 1"));
+        QTRY_VERIFY(!viewer->property("selectionOcrRunning").toBool());
+        QVERIFY(viewer->grab().save("runs/selection-ocr/copied.png"));
+        QVERIFY(!probe->onGuiThread());
+        QCOMPARE(storedNumber(options.directory, "SELECT COUNT(*) FROM frames"), qint64(1));
+        QCOMPARE(storedNumber(options.directory, "SELECT COUNT(*) FROM frames WHERE ocr_state='pending'"), qint64(1));
+        QCOMPARE(storedNumber(options.directory, "SELECT COUNT(*) FROM frame_text"), qint64(0));
+
+        // Full-size scroll offsets must not shift the crop within the source.
+        QTest::keyClick(viewer.get(), Qt::Key_1);
+        QTRY_COMPARE(canvas->size(), source.size());
+        evidence->horizontalScrollBar()->setValue(200);
+        evidence->verticalScrollBar()->setValue(100);
+        QVERIFY(evidence->horizontalScrollBar()->value() > 0);
+        QVERIFY(evidence->verticalScrollBar()->value() > 0);
+        const QPoint scrolledFrom = canvas->mapFrom(evidence->viewport(), QPoint(70, 60));
+        const QPoint scrolledTo = canvas->mapFrom(evidence->viewport(), QPoint(290, 155));
+        const QRect fullSelection = dragTextSelection(canvas, scrolledFrom, scrolledTo);
+        QTRY_COMPARE(probe->count(), 2);
+        QCOMPARE(fullSelection.topLeft(), scrolledFrom);
+        QVERIFY(qAbs(fullSelection.width() - 220) <= 1);
+        QVERIFY(qAbs(fullSelection.height() - 95) <= 1);
+        QCOMPARE(probe->crop(1).convertToFormat(QImage::Format_RGBA8888), source.copy(fullSelection).convertToFormat(QImage::Format_RGBA8888));
+        probe->release(2);
+        QTRY_COMPARE(clipboard->text(), QString("Selected text 2"));
+
+        // Dragging beyond the displayed image clamps to real source pixels.
+        QTest::keyClick(viewer.get(), Qt::Key_F);
+        const QRect edgeSelection = dragTextSelection(canvas, canvas->rect().center(), QPoint(-40, -30));
+        QCOMPARE(edgeSelection.topLeft(), QPoint(0, 0));
+        QVERIFY(source.rect().contains(edgeSelection));
+        QTRY_COMPARE(probe->count(), 3);
+        QCOMPARE(probe->crop(2).convertToFormat(QImage::Format_RGBA8888), source.copy(edgeSelection).convertToFormat(QImage::Format_RGBA8888));
+        probe->release(3);
+        QTRY_COMPARE(clipboard->text(), QString("Selected text 3"));
+        QCOMPARE(probe->maximumActive(), 1);
+        viewer->close();
+    }
+
+    void realSelectionOcrCopiesOnlyDraggedTextAtDesktopAndCompactSizes() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        ViewerEnvironment environment(temporary.path());
+        const bool hadLanguage = qEnvironmentVariableIsSet("OMARCHY_OCR_LANGS");
+        const QByteArray language = qgetenv("OMARCHY_OCR_LANGS");
+        const auto restoreLanguage = qScopeGuard([&] {
+            if (hadLanguage) qputenv("OMARCHY_OCR_LANGS", language); else qunsetenv("OMARCHY_OCR_LANGS");
+        });
+        qputenv("OMARCHY_OCR_LANGS", "eng");
+        QImage source(1000, 320, QImage::Format_RGBA8888); source.fill(Qt::white);
+        {
+            QPainter painter(&source); painter.setPen(Qt::black);
+            QFont font("DejaVu Sans"); font.setPixelSize(36); painter.setFont(font);
+            painter.drawText(32, 55, "OUTSIDE ABOVE");
+            painter.drawText(32, 170, "SELECTED TEXT 4821");
+            painter.drawText(720, 170, "OUTSIDE");
+            painter.drawText(32, 285, "OUTSIDE BELOW");
+        }
+        replay::RecorderOptions options;
+        options.directory = temporary.filePath("real-selection-history");
+        options.deferredOcr = true; options.minFreeBytes = 0;
+        qint64 id;
+        { replay::Recorder recorder(options); id = recorder.addFrame(source, 1000).frameId; recorder.finish(); }
+        // No OCR hook: this exercises displayed archive pixels, crop mapping,
+        // the native subprocess backend, and the guarded clipboard completion.
+        auto viewer = replay::createViewer(options.directory);
+        viewer->show(); viewer->activateWindow();
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), id);
+        auto* canvas = viewer->findChild<QWidget*>("recordedImage"); QVERIFY(canvas);
+        QVERIFY(QDir().mkpath("runs/selection-ocr"));
+        for (const auto& size : {QSize(1440, 920), QSize(900, 620)}) {
+            viewer->resize(size); QTest::qWait(60);
+            const auto canvasPoint = [&](const QPoint& point) {
+                return QPoint(qRound(double(point.x()) * canvas->width() / source.width()),
+                              qRound(double(point.y()) * canvas->height() / source.height()));
+            };
+            const QPoint from = canvasPoint(QPoint(16, 110));
+            const QPoint to = canvasPoint(QPoint(626, 200));
+            QApplication::clipboard()->setText("untouched before recognition");
+            QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, from);
+            moveTextSelection(canvas, to);
+            QVERIFY(canvas->property("textSelectionActive").toBool());
+            QVERIFY(viewer->grab().save(QString("runs/selection-ocr/real-%1-selecting.png").arg(size.width())));
+            QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, to);
+            QTRY_COMPARE_WITH_TIMEOUT(QApplication::clipboard()->text(), QString("SELECTED TEXT 4821"), 12000);
+            QTRY_VERIFY(!viewer->property("selectionOcrRunning").toBool());
+            QVERIFY(!QApplication::clipboard()->text().contains("OUTSIDE"));
+            QVERIFY(viewer->grab().save(QString("runs/selection-ocr/real-%1-copied.png").arg(size.width())));
+        }
+        QCOMPARE(storedNumber(options.directory, "SELECT COUNT(*) FROM frames WHERE ocr_state='pending'"), qint64(1));
+        QCOMPARE(storedNumber(options.directory, "SELECT COUNT(*) FROM frame_text"), qint64(0));
+        viewer->close();
+    }
+
+    void selectionCopyPreservesClipboardOnFailureCancellationAndNavigation() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        ViewerEnvironment environment(temporary.path());
+        replay::RecorderOptions options;
+        options.directory = temporary.filePath("selection-cancellation-history");
+        options.deferredOcr = true; options.minFreeBytes = 0;
+        std::array<qint64, 2> ids{};
+        {
+            replay::Recorder recorder(options);
+            ids[0] = recorder.addFrame(prefixScreen("Earlier synthetic note", 1), 1000).frameId;
+            ids[1] = recorder.addFrame(prefixScreen("Later synthetic note", 2), 2000).frameId;
+            recorder.finish();
+        }
+        auto probe = std::make_shared<SelectionOcrProbe>();
+        probe->replies = {{" \n\t", {}, false}, {{}, "Synthetic recognition failure", false}};
+        auto viewer = replay::createViewer(options.directory, probe->hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), ids[1]);
+        auto* canvas = viewer->findChild<QWidget*>("recordedImage"); QVERIFY(canvas);
+        auto* notice = viewer->findChild<QLabel*>("copyStatus"); QVERIFY(notice);
+        const auto select = [&] { return dragTextSelection(canvas, QPoint(40, 50), QPoint(260, 150)); };
+        auto* clipboard = QApplication::clipboard();
+        clipboard->setText("original clipboard");
+        for (int call = 1; call <= 2; ++call) {
+            QVERIFY(!select().isEmpty()); QTRY_COMPARE(probe->count(), call);
+            probe->release(call);
+            QTRY_VERIFY(!viewer->property("selectionOcrRunning").toBool());
+            QCOMPARE(clipboard->text(), QString("original clipboard"));
+            QVERIFY(notice->isVisible()); QVERIFY(!notice->text().isEmpty());
+        }
+        select(); QTRY_COMPARE(probe->count(), 3);
+        clipboard->setText("newer copy from another app");
+        probe->release(3);
+        QTRY_VERIFY(!viewer->property("selectionOcrRunning").toBool());
+        QCOMPARE(clipboard->text(), QString("newer copy from another app"));
+
+        select(); QTRY_COMPARE(probe->count(), 4);
+        QTest::keyClick(canvas, Qt::Key_Escape);
+        QTRY_VERIFY(probe->cancelled(3));
+        QVERIFY(viewer->isVisible());
+        probe->release(4);
+        QTRY_VERIFY(!viewer->property("selectionOcrRunning").toBool());
+        QCOMPARE(clipboard->text(), QString("newer copy from another app"));
+
+        select(); QTRY_COMPARE(probe->count(), 5);
+        QTest::keyClick(viewer.get(), Qt::Key_Left);
+        QTRY_COMPARE(viewer->property("displayedFrameId").toLongLong(), ids[0]);
+        QTRY_VERIFY(probe->cancelled(4));
+        probe->release(5);
+        QTRY_VERIFY(!viewer->property("selectionOcrRunning").toBool());
+        QCOMPARE(clipboard->text(), QString("newer copy from another app"));
+        QCOMPARE(storedNumber(options.directory, "SELECT COUNT(*) FROM frames WHERE ocr_state='pending'"), qint64(2));
+        QCOMPARE(storedNumber(options.directory, "SELECT COUNT(*) FROM frame_text"), qint64(0));
+        QVERIFY(!probe->onGuiThread());
+        probe->cooperateWithCancellation();
+        select(); QTRY_COMPARE(probe->count(), 6);
+        QElapsedTimer closeTime; closeTime.start();
+        viewer->close();
+        QVERIFY(closeTime.elapsed() < 2000);
+        QVERIFY(probe->cancelled(5));
+        QVERIFY(!viewer->isVisible());
+        QVERIFY(!viewer->property("selectionOcrRunning").toBool());
+        QCOMPARE(clipboard->text(), QString("newer copy from another app"));
+    }
+
+    void newestSelectionReplacesQueuedWorkWithoutParallelOcr() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        ViewerEnvironment environment(temporary.path());
+        replay::RecorderOptions options;
+        options.directory = temporary.filePath("selection-queue-history");
+        options.deferredOcr = true; options.minFreeBytes = 0;
+        const QImage source = prefixScreen("The newest selection wins", 1);
+        { replay::Recorder recorder(options); recorder.addFrame(source, 1000); recorder.finish(); }
+        auto probe = std::make_shared<SelectionOcrProbe>();
+        auto viewer = replay::createViewer(options.directory, probe->hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(viewer->property("displayedFrameId").toLongLong() > 0);
+        auto* canvas = viewer->findChild<QWidget*>("recordedImage"); QVERIFY(canvas);
+        QApplication::clipboard()->setText("keep while newer selection waits");
+        dragTextSelection(canvas, QPoint(40, 50), QPoint(200, 120));
+        QTRY_COMPARE(probe->count(), 1);
+        dragTextSelection(canvas, QPoint(60, 130), QPoint(270, 230));
+        QTRY_VERIFY(probe->cancelled(0));
+        const QRect newest = dragTextSelection(canvas, QPoint(100, 180), QPoint(400, 320));
+        QCOMPARE(probe->count(), 1);
+        QCOMPARE(QApplication::clipboard()->text(), QString("keep while newer selection waits"));
+        probe->release(1);
+        QTRY_COMPARE(probe->count(), 2);
+        QCOMPARE(probe->crop(1).convertToFormat(QImage::Format_RGBA8888), source.copy(newest).convertToFormat(QImage::Format_RGBA8888));
+        QCOMPARE(QApplication::clipboard()->text(), QString("keep while newer selection waits"));
+        probe->release(2);
+        QTRY_COMPARE(QApplication::clipboard()->text(), QString("Selected text 2"));
+        QTRY_VERIFY(!viewer->property("selectionOcrRunning").toBool());
+        QCOMPARE(probe->count(), 2); QCOMPARE(probe->maximumActive(), 1);
+        QVERIFY(!probe->onGuiThread());
+        viewer->close();
+    }
+
+    void keyboardSelectionMovesResizesCopiesAndCancels() {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        ViewerEnvironment environment(temporary.path());
+        replay::RecorderOptions options;
+        options.directory = temporary.filePath("keyboard-selection-history");
+        options.deferredOcr = true; options.minFreeBytes = 0;
+        const QImage source = prefixScreen("Select this text with the keyboard", 1);
+        { replay::Recorder recorder(options); recorder.addFrame(source, 1000); recorder.finish(); }
+        auto probe = std::make_shared<SelectionOcrProbe>();
+        auto viewer = replay::createViewer(options.directory, probe->hooks());
+        viewer->show(); viewer->activateWindow();
+        QTRY_VERIFY(viewer->property("displayedFrameId").toLongLong() > 0);
+        auto* canvas = viewer->findChild<QWidget*>("recordedImage"); QVERIFY(canvas);
+        QTest::keyClick(viewer->findChild<QLineEdit*>("recallSearch"), Qt::Key_Escape);
+        QTest::keyClick(viewer.get(), Qt::Key_S);
+        QVERIFY(canvas->property("textSelectionActive").toBool());
+        const QRect initial = canvas->property("textSelectionRect").toRect();
+        QVERIFY(!initial.isEmpty()); QVERIFY(source.rect().contains(initial));
+        QTest::keyClick(canvas, Qt::Key_Right);
+        const QRect moved = canvas->property("textSelectionRect").toRect();
+        QVERIFY(moved.left() > initial.left()); QCOMPARE(moved.size(), initial.size());
+        QTest::keyClick(canvas, Qt::Key_Down, Qt::ShiftModifier);
+        const QRect resized = canvas->property("textSelectionRect").toRect();
+        QCOMPARE(resized.topLeft(), moved.topLeft()); QVERIFY(resized.height() > moved.height());
+        QApplication::clipboard()->setText("keyboard selection pending");
+        QTest::keyClick(canvas, Qt::Key_Return);
+        QTRY_COMPARE(probe->count(), 1);
+        QCOMPARE(probe->crop(0).convertToFormat(QImage::Format_RGBA8888), source.copy(resized).convertToFormat(QImage::Format_RGBA8888));
+        probe->release(1);
+        QTRY_COMPARE(QApplication::clipboard()->text(), QString("Selected text 1"));
+        QTRY_VERIFY(!viewer->property("selectionOcrRunning").toBool());
+        QTest::keyClick(viewer.get(), Qt::Key_S);
+        QVERIFY(canvas->property("textSelectionActive").toBool());
+        QTest::keyClick(canvas, Qt::Key_Escape);
+        QVERIFY(!canvas->property("textSelectionActive").toBool());
+        QVERIFY(viewer->isVisible()); QCOMPARE(probe->count(), 1);
+        QCOMPARE(QApplication::clipboard()->text(), QString("Selected text 1"));
+
+        // Abandoning a keyboard selection must clear its untimed instructions
+        // without submitting OCR or leaving arrows trapped in selection mode.
+        auto* notice = viewer->findChild<QLabel*>("copyStatus"); QVERIFY(notice);
+        QTest::keyClick(viewer.get(), Qt::Key_S);
+        QTRY_VERIFY(canvas->hasFocus());
+        QVERIFY(canvas->property("textSelectionActive").toBool()); QVERIFY(notice->isVisible());
+        QTest::keyClick(canvas, Qt::Key_Tab);
+        QTRY_VERIFY(!canvas->hasFocus());
+        QTRY_VERIFY(!canvas->property("textSelectionActive").toBool());
+        QVERIFY(!notice->isVisible());
+
+        QTest::keyClick(viewer.get(), Qt::Key_S);
+        QVERIFY(canvas->property("textSelectionActive").toBool()); QVERIFY(notice->isVisible());
+        QTest::keyClick(viewer.get(), Qt::Key_1);
+        QTRY_VERIFY(!canvas->property("textSelectionActive").toBool());
+        QVERIFY(!notice->isVisible());
+
+        QTest::keyClick(viewer.get(), Qt::Key_F);
+        QTest::keyClick(viewer.get(), Qt::Key_S);
+        QVERIFY(canvas->property("textSelectionActive").toBool()); QVERIFY(notice->isVisible());
+        viewer->resize(900, 620);
+        QTRY_VERIFY(!canvas->property("textSelectionActive").toBool());
+        QVERIFY(!notice->isVisible());
+        QCOMPARE(probe->count(), 1);
+        QCOMPARE(QApplication::clipboard()->text(), QString("Selected text 1"));
         viewer->close();
     }
 

@@ -169,39 +169,173 @@ public:
     QImage image;
     QVector<QRect> highlights;
     bool showHighlights = true;
-    explicit ImageCanvas(QWidget* parent = nullptr) : QWidget(parent) {
+    std::function<void()> selectionStarted;
+    std::function<void()> selectionCancelled;
+    std::function<void(const QRect&)> selectionFinished;
+    explicit ImageCanvas(const QColor& accent) : accent_(accent) {
         setObjectName("recordedImage");
-        setAccessibleName("Recorded screen with matching text highlights");
+        setAccessibleName("Recorded screen. Drag to copy text, or press S to select with the keyboard.");
+        setFocusPolicy(Qt::StrongFocus);
+        clearSelection();
+    }
+    void setSelectionAvailable(bool available) {
+        available_ = available;
+        setCursor(available ? Qt::CrossCursor : Qt::ArrowCursor);
+        if (!available) clearSelection();
+    }
+    bool selectionActive() const { return dragging_ || keyboard_ || !selection_.isEmpty(); }
+    void clearSelection() {
+        dragging_ = keyboard_ = false;
+        selection_ = {};
+        publishSelection();
+    }
+    void beginKeyboardSelection(QRect visible) {
+        if (!available_ || image.isNull()) return;
+        if (selectionStarted) selectionStarted();
+        setFocus(Qt::ShortcutFocusReason);
+        visible = visible.intersected(rect());
+        if (visible.isEmpty()) return;
+        const QSizeF size(std::min(320, visible.width()), std::min(100, visible.height()));
+        selection_ = QRectF(QPointF(visible.center()) - QPointF(size.width() / 2, size.height() / 2), size);
+        keyboard_ = true;
+        publishSelection();
+    }
+    bool selectionKey(QKeyEvent* key) {
+        if (!keyboard_) return false;
+        if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) && key->modifiers() == Qt::NoModifier) {
+            keyboard_ = false;
+            if (selectionFinished) selectionFinished(sourceSelection());
+            return true;
+        }
+        if (key->modifiers() != Qt::NoModifier && key->modifiers() != Qt::ShiftModifier) return false;
+        QPointF delta;
+        switch (key->key()) {
+        case Qt::Key_Left: delta.setX(-5); break;
+        case Qt::Key_Right: delta.setX(5); break;
+        case Qt::Key_Up: delta.setY(-5); break;
+        case Qt::Key_Down: delta.setY(5); break;
+        default: return false;
+        }
+        if (key->modifiers() == Qt::ShiftModifier) {
+            selection_.setWidth(std::clamp(selection_.width() + delta.x(), 1., width() - selection_.left()));
+            selection_.setHeight(std::clamp(selection_.height() + delta.y(), 1., height() - selection_.top()));
+        } else {
+            selection_.moveLeft(std::clamp(selection_.left() + delta.x(), 0., width() - selection_.width()));
+            selection_.moveTop(std::clamp(selection_.top() + delta.y(), 0., height() - selection_.height()));
+        }
+        publishSelection();
+        return true;
     }
 protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton || !available_ || image.isNull()) return;
+        if (selectionStarted) selectionStarted();
+        setFocus(Qt::MouseFocusReason);
+        anchor_ = bounded(event->position());
+        dragging_ = true;
+        selection_ = {};
+        publishSelection();
+        event->accept();
+    }
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!dragging_) return;
+        updateDrag(event->position());
+        event->accept();
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton || !dragging_) return;
+        updateDrag(event->position());
+        dragging_ = false;
+        const QRect crop = sourceSelection();
+        if (!crop.isEmpty() && selectionFinished) selectionFinished(crop);
+        else clearSelection();
+        event->accept();
+    }
+    void resizeEvent(QResizeEvent* event) override {
+        if ((dragging_ || keyboard_) && selectionCancelled) selectionCancelled();
+        else if (selectionActive()) clearSelection();
+        QWidget::resizeEvent(event);
+    }
+    void focusOutEvent(QFocusEvent* event) override {
+        if (keyboard_ && selectionCancelled) selectionCancelled();
+        QWidget::focusOutEvent(event);
+    }
     void paintEvent(QPaintEvent*) override {
         if (image.isNull()) return;
         QPainter painter(this);
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
         painter.drawImage(rect(), image);
-        if (!showHighlights) return;
-        painter.scale(double(width()) / image.width(), double(height()) / image.height());
-        QPen pen(QColor("#f6cc59"));
-        pen.setCosmetic(true);
-        pen.setWidth(2);
-        painter.setPen(pen);
-        painter.setBrush(QColor(246, 204, 89, 62));
-        for (const auto& box : highlights) painter.drawRect(box);
+        if (showHighlights) {
+            painter.save();
+            painter.scale(double(width()) / image.width(), double(height()) / image.height());
+            QPen pen(QColor("#f6cc59"));
+            pen.setCosmetic(true);
+            pen.setWidth(2);
+            painter.setPen(pen);
+            painter.setBrush(QColor(246, 204, 89, 62));
+            for (const auto& box : highlights) painter.drawRect(box);
+            painter.restore();
+        }
+        if (!selection_.isEmpty()) {
+            painter.setPen(QPen(QColor(0, 0, 0, 190), 4));
+            QColor fill = accent_; fill.setAlpha(28);
+            painter.setBrush(fill);
+            painter.drawRect(selection_);
+            painter.setPen(QPen(accent_, 2));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(selection_);
+        }
     }
+private:
+    QPointF bounded(QPointF point) const {
+        return {std::clamp(point.x(), 0., double(width())), std::clamp(point.y(), 0., double(height()))};
+    }
+    void updateDrag(QPointF point) {
+        point = bounded(point);
+        selection_ = (point - anchor_).manhattanLength() >= QApplication::startDragDistance()
+            ? QRectF(anchor_, point).normalized() : QRectF();
+        publishSelection();
+    }
+    QRect sourceSelection() const {
+        if (selection_.isEmpty() || image.isNull() || width() <= 0 || height() <= 0) return {};
+        const double sx = double(image.width()) / width(), sy = double(image.height()) / height();
+        const int left = std::clamp(int(std::floor(selection_.left() * sx)), 0, image.width());
+        const int top = std::clamp(int(std::floor(selection_.top() * sy)), 0, image.height());
+        const int right = std::clamp(int(std::ceil(selection_.right() * sx)), left, image.width());
+        const int bottom = std::clamp(int(std::ceil(selection_.bottom() * sy)), top, image.height());
+        return {left, top, right - left, bottom - top};
+    }
+    void publishSelection() {
+        setProperty("textSelectionActive", selectionActive());
+        setProperty("textSelectionRect", sourceSelection());
+        update();
+    }
+    QColor accent_;
+    bool available_ = false, dragging_ = false, keyboard_ = false;
+    QPointF anchor_;
+    QRectF selection_;
 };
 
 class EvidenceView final : public QScrollArea {
 public:
-    EvidenceView() {
+    explicit EvidenceView(const QColor& accent) {
         setObjectName("evidenceView");
         setAccessibleName("Recorded screen image");
         setAlignment(Qt::AlignCenter);
         setFrameShape(QFrame::NoFrame);
-        canvas_ = new ImageCanvas;
+        canvas_ = new ImageCanvas(accent);
         setWidget(canvas_);
         setFocusPolicy(Qt::StrongFocus);
     }
-    void setImage(const QImage& image) { canvas_->image = image; setProperty("hasImage", !image.isNull()); render(); }
+    void setImage(const QImage& image) {
+        canvas_->clearSelection(); canvas_->image = image;
+        canvas_->setSelectionAvailable(!image.isNull());
+        setProperty("hasImage", !image.isNull()); render();
+    }
+    ImageCanvas* canvas() const { return canvas_; }
+    void beginKeyboardSelection() {
+        canvas_->beginKeyboardSelection(QRect(canvas_->mapFrom(viewport(), QPoint()), viewport()->size()));
+    }
     void setHighlights(const QVector<QRect>& boxes) { canvas_->highlights = boxes; canvas_->update(); }
     void toggleHighlights() { canvas_->showHighlights = !canvas_->showHighlights; canvas_->update(); }
     void setFit(bool fit) { fit_ = fit; setProperty("fit", fit); render(); }
@@ -928,6 +1062,19 @@ QString elapsedDescription(qint64 milliseconds) {
 struct SeekResult { quint64 revision = 0; std::optional<FrameRecord> frame; QString error; };
 struct HighlightResult { qint64 id = 0; QString directory, query; TextMatches matches; QString error; };
 
+struct SelectionRequest {
+    QImage image;
+    QRect crop;
+    qint64 frameId = 0;
+    quint64 revision = 0, clipboardRevision = 0;
+};
+
+struct SelectionResult {
+    SelectionOcrResult ocr;
+    qint64 frameId = 0;
+    quint64 revision = 0, clipboardRevision = 0;
+};
+
 class Viewer final : public QWidget {
 public:
     explicit Viewer(QString directory, ViewerServiceHooks services) : directory_(QDir(directory).absolutePath()), services_(std::move(services)) {
@@ -939,6 +1086,7 @@ public:
         if (!services_.recordingStatus) services_.recordingStatus = recordingServiceStatus;
         if (!services_.recordingControl) services_.recordingControl = controlRecordingService;
         if (!services_.displays) services_.displays = connectedDisplays;
+        if (!services_.selectionOcr) services_.selectionOcr = recognizeSelection;
         setWindowTitle("Omarchy Replay");
         setProperty("historyDirectory", directory_);
         setObjectName("replayViewer");
@@ -1125,6 +1273,7 @@ public:
             {"Home  End", "First / latest moment"}, {"PgUp  PgDn", "Previous / next match page"}, {"F  /  1", "Fit / original size"},
             {"Shift+arrows", "Pan original image"}, {"Ctrl+C", "Copy matching lines (or all text without a search)"},
             {"Ctrl+Shift+C", "Copy all recognized screen text"}, {"M", "Toggle highlights"},
+            {"Drag  /  S", "Select text to copy"}, {"Arrows / Shift+arrows", "Move / resize selection; Enter copies"},
             {"P  /  C", "Index moment / catch up"}, {"I  /  ?", "Controls / shortcuts"}, {"Esc", "Leave control / dismiss panel, then close"}};
         const int helpRows = (shortcuts.size() + 1) / 2;
         for (int i = 0; i < shortcuts.size(); ++i) {
@@ -1162,7 +1311,7 @@ public:
         mediaStatus_->setWordWrap(true);
         mediaStatus_->setTextFormat(Qt::PlainText);
         layout->addWidget(mediaStatus_);
-        evidence_ = new EvidenceView;
+        evidence_ = new EvidenceView(colors.accent);
         layout->addWidget(evidence_, 1);
         auto* caption = new QHBoxLayout;
         recorded_ = new QLabel("Loading history…");
@@ -1177,6 +1326,30 @@ public:
         copyNoticeTimer_.setSingleShot(true);
         copyNoticeTimer_.setInterval(3000);
         connect(&copyNoticeTimer_, &QTimer::timeout, copyStatus_, &QWidget::hide);
+        evidence_->canvas()->selectionStarted = [this] { cancelSelectionOcr(); };
+        evidence_->canvas()->selectionCancelled = [this] { cancelSelectionOcr(); };
+        evidence_->canvas()->selectionFinished = [this](const QRect& crop) { requestSelectionOcr(crop); };
+        connect(QApplication::clipboard(), &QClipboard::dataChanged, this, [this] { ++clipboardRevision_; });
+        connect(&selectionOcr_, &QFutureWatcher<SelectionResult>::finished, this, [this] {
+            selectionWorkerActive_ = false;
+            setProperty("selectionOcrRunning", false);
+            if (closing_->load()) return;
+            const auto result = selectionOcr_.result();
+            if (result.revision == selectionOcrRevision_ && result.frameId == selected_.id &&
+                result.frameId == property("displayedFrameId").toLongLong()) {
+                setProperty("selectionOcrBusy", false);
+                evidence_->canvas()->clearSelection();
+                if (result.ocr.cancelled) copyStatus_->hide();
+                else if (!result.ocr.error.isEmpty()) copyNotice(result.ocr.error);
+                else if (result.ocr.text.trimmed().isEmpty()) copyNotice("No text found in selection.");
+                else if (result.clipboardRevision != clipboardRevision_) copyNotice("Clipboard changed. Select again to copy.");
+                else {
+                    QApplication::clipboard()->setText(result.ocr.text);
+                    copyNotice("Text copied");
+                }
+            }
+            startSelectionOcr();
+        });
         indexState_ = new QLabel;
         indexState_->setObjectName("indexState");
         indexState_->setTextFormat(Qt::PlainText);
@@ -1196,7 +1369,7 @@ public:
         layout->addWidget(matchReadout_);
         matchReadout_->hide();
         timeline_ = new TimelineView(colors);
-        timeline_->activateMatch = [this](qint64 id) { search(false, -1, -1, id); };
+        timeline_->activateMatch = [this](qint64 id) { cancelSelectionOcr(); search(false, -1, -1, id); };
         layout->addWidget(timeline_);
         layout->addWidget(results_);
         auto* controls = new QHBoxLayout;
@@ -1208,14 +1381,14 @@ public:
         auto* actual = new QPushButton("100%"); actual->setObjectName("actualImageSize");
         for (auto* button : {previous_, next_, fit, actual}) controls->addWidget(button);
         controls->addStretch();
-        auto* keys = new QLabel("/ search   ← → time   ↑ ↓ matches   ? help");
+        auto* keys = new QLabel("/ search   ← → time   ↑ ↓ matches   S select text   ? help");
         keys->setObjectName("keyboardHelp");
         controls->addWidget(keys);
         layout->addLayout(controls);
         searchTimer_.setSingleShot(true);
         searchTimer_.setInterval(180);
         connect(&searchTimer_, &QTimer::timeout, this, [this] { search(); });
-        connect(query_, &QLineEdit::textChanged, this, [this] { cancelSeek(); searchTimer_.start(); });
+        connect(query_, &QLineEdit::textChanged, this, [this] { cancelSelectionOcr(); cancelSeek(); searchTimer_.start(); });
         connect(query_, &QLineEdit::returnPressed, this, [this] {
             search();
             if (query_->text().trimmed().isEmpty()) timeline_->setFocus(); else results_->setFocus();
@@ -1354,7 +1527,7 @@ public:
                         evidence_->setHighlights(highlighted_.matches.boxes);
                     mediaStatus_->clear();
                     mediaStatus_->hide();
-                    evidence_->setToolTip(QString("Recorded screen · %1 × %2 · F fit / 1 original size").arg(result.image.width()).arg(result.image.height()));
+                    evidence_->setToolTip(QString("Drag to copy text · S keyboard selection · %1 × %2 · F fit / 1 original size").arg(result.image.width()).arg(result.image.height()));
                 }
             } else {
                 startDecode();
@@ -1390,6 +1563,7 @@ protected:
     bool eventFilter(QObject* object, QEvent* event) override {
         if (event->type() == QEvent::KeyPress) {
             auto* key = static_cast<QKeyEvent*>(event);
+            if (object == evidence_->canvas() && evidence_->canvas()->selectionKey(key)) return true;
             if (object != query_ && key->modifiers() == Qt::ShiftModifier &&
                 (key->key() == Qt::Key_Left || key->key() == Qt::Key_Right || key->key() == Qt::Key_Up || key->key() == Qt::Key_Down)) {
                 auto* scroll = (key->key() == Qt::Key_Left || key->key() == Qt::Key_Right)
@@ -1418,6 +1592,13 @@ protected:
                     case Qt::Key_F: evidence_->setFit(true); return true;
                     case Qt::Key_1: evidence_->setFit(false); return true;
                     case Qt::Key_M: evidence_->toggleHighlights(); return true;
+                    case Qt::Key_S:
+                        evidence_->beginKeyboardSelection();
+                        if (evidence_->canvas()->selectionActive()) {
+                            copyNotice("Arrows move · Shift+arrows resize · Enter copies");
+                            copyNoticeTimer_.stop();
+                        }
+                        return true;
                     case Qt::Key_H: stepTime(-1); return true;
                     case Qt::Key_L: stepTime(1); return true;
                     case Qt::Key_Home: seekTime(overview_.firstTimestampMs); return true;
@@ -1468,6 +1649,7 @@ private:
             (status.contains("storage_available") && !status.value("storage_available").toBool()) ||
             QDir(history).absolutePath() == directory_) return false;
         directory_ = QDir(history).absolutePath();
+        cancelSelectionOcr();
         setProperty("historyDirectory", directory_);
         cancelSeek(); ++selectionRevision_;
         selected_ = {}; matches_.clear(); requestedMoments_.clear();
@@ -1555,6 +1737,11 @@ private:
     }
 
     void escape() {
+        if (evidence_->canvas()->selectionActive() || property("selectionOcrBusy").toBool()) {
+            cancelSelectionOcr();
+            setFocus(Qt::OtherFocusReason);
+            return;
+        }
         if (query_->hasFocus() && query_->text() != completedQuery_) search();
         if (details_->isVisible() || help_->isVisible()) {
             detailsToggle_->setChecked(false);
@@ -1576,6 +1763,7 @@ private:
     }
 
     void copyText(bool wholeScreen) {
+        cancelSelectionOcr();
         if (!selected_.id || property("displayedFrameId").toLongLong() != selected_.id) {
             copyNotice("Wait for the recorded image to load.");
             return;
@@ -1601,13 +1789,61 @@ private:
         copyNotice(searching && !wholeScreen ? "Matching lines copied" : "Screen text copied");
     }
 
+    void cancelSelectionOcr() {
+        ++selectionOcrRevision_;
+        if (selectionCancel_) selectionCancel_->store(true);
+        pendingSelection_.reset();
+        const bool hadSelection = evidence_->canvas()->selectionActive() || property("selectionOcrBusy").toBool();
+        evidence_->canvas()->clearSelection();
+        setProperty("selectionOcrBusy", false);
+        if (hadSelection) { copyNoticeTimer_.stop(); copyStatus_->hide(); }
+    }
+
+    void requestSelectionOcr(const QRect& crop) {
+        if (closing_->load() || crop.isEmpty() || selected_.id <= 0 ||
+            property("displayedFrameId").toLongLong() != selected_.id) return;
+        if (selectionCancel_) selectionCancel_->store(true);
+        pendingSelection_ = SelectionRequest{evidence_->canvas()->image, crop, selected_.id,
+            ++selectionOcrRevision_, clipboardRevision_};
+        setProperty("selectionOcrBusy", true);
+        copyNotice("Reading selection… Esc cancels");
+        copyNoticeTimer_.stop();
+        startSelectionOcr();
+    }
+
+    void startSelectionOcr() {
+        if (selectionWorkerActive_ || !pendingSelection_ || closing_->load()) return;
+        const auto request = std::move(*pendingSelection_);
+        pendingSelection_.reset();
+        selectionCancel_ = std::make_shared<std::atomic_bool>(false);
+        const auto cancel = selectionCancel_;
+        const auto recognize = services_.selectionOcr;
+        selectionWorkerActive_ = true;
+        setProperty("selectionOcrRunning", true);
+        selectionOcr_.setFuture(QtConcurrent::run([request, cancel, recognize] {
+            SelectionResult result{{}, request.frameId, request.revision, request.clipboardRevision};
+            try {
+                if (cancel->load()) result.ocr.cancelled = true;
+                else result.ocr = recognize(request.image.copy(request.crop), cancel);
+            } catch (const std::exception&) {
+                result.ocr.error = "Could not read the selected text. Try a smaller area.";
+            } catch (...) {
+                result.ocr.error = "Could not read the selected text.";
+            }
+            return result;
+        }));
+    }
+
     void finishWork() {
         if (closing_->exchange(true)) return;
+        cancelSelectionOcr();
         searchTimer_.stop();
         refreshTimer_.stop();
         dwellTimer_.stop();
         seekTimer_.stop();
         copyNoticeTimer_.stop();
+        selectionOcr_.waitForFinished();
+        setProperty("selectionOcrRunning", false);
         // Value-captured jobs never access widgets. Stop queued jobs, cancel an
         // active decoder, and let a started SQLite transaction finish (the core
         // uses a one-second busy timeout) before the dataset/viewer can go away.
@@ -1785,6 +2021,7 @@ private:
             } else if (snapshot.current && snapshot.targetRow < 0) {
                 openFrame(*snapshot.current);
             } else if (matches_.isEmpty()) {
+                cancelSelectionOcr();
                 selected_ = {};
                 ++selectionRevision_;
                 dwellTimer_.stop();
@@ -1810,6 +2047,7 @@ private:
             }
             results_->clear();
             matches_.clear();
+            cancelSelectionOcr();
             selected_ = {};
             ++selectionRevision_;
             dwellTimer_.stop();
@@ -1852,6 +2090,7 @@ private:
     void openFrame(const FrameRecord& frame) {
         const bool changed = selected_.id != frame.id;
         const bool keepImage = selected_.id == frame.id && selected_.available == frame.available;
+        if (!keepImage) cancelSelectionOcr();
         if (changed) { ++selectionRevision_; dwellTimer_.stop(); }
         selected_ = frame;
         setProperty("selectedFrameId", frame.id);
@@ -1873,6 +2112,7 @@ private:
         if (changed && frame.ocrState == "pending" && !requestedMoments_.contains(frame.id)) dwellTimer_.start();
         if (keepImage) return;
         setProperty("displayedFrameId", 0);
+        evidence_->canvas()->setSelectionAvailable(false);
         evidence_->setHighlights({});
         // Keep the previous pixels until the new image is ready. Repainting an
         // empty themed canvas produces a conspicuous flash during short decodes.
@@ -2096,6 +2336,7 @@ private:
     }
 
     void seekTime(qint64 timestamp) {
+        cancelSelectionOcr();
         seekPending_ = true;
         seekTarget_ = timestamp;
         ++seekRevision_;
@@ -2150,6 +2391,7 @@ private:
     }
 
     void changePage(int direction) {
+        cancelSelectionOcr();
         if (property("historyLoading").toBool() && !requestedHistory_.preserve) return;
         if (completedQuery_.trimmed().isEmpty() || totalMatches_ <= 0) return;
         const auto target = pageOffset_ + direction * 100;
@@ -2158,6 +2400,7 @@ private:
     }
 
     void stepMatch(int direction) {
+        cancelSelectionOcr();
         if (property("historyLoading").toBool() && !requestedHistory_.preserve) return;
         if (matches_.isEmpty()) return;
         const int target = results_->currentRow() + direction;
@@ -2169,6 +2412,7 @@ private:
     }
 
     void stepTime(int direction) {
+        cancelSelectionOcr();
         cancelSeek();
         const auto neighbor = direction < 0 ? previousFrame_ : nextFrame_;
         if (neighbor) openFrame(*neighbor);
@@ -2206,6 +2450,11 @@ private:
     QLabel* storageCapacity_ = nullptr;
     QLabel* storageDetails_ = nullptr;
     QFutureWatcher<ServiceControlResult> recordingRequest_;
+    QFutureWatcher<SelectionResult> selectionOcr_;
+    std::optional<SelectionRequest> pendingSelection_;
+    std::shared_ptr<std::atomic_bool> selectionCancel_;
+    bool selectionWorkerActive_ = false;
+    quint64 selectionOcrRevision_ = 0, clipboardRevision_ = 0;
     std::shared_ptr<std::atomic_bool> closing_ = std::make_shared<std::atomic_bool>(false);
     QString completedQuery_;
     qint64 pending_ = 0, failed_ = 0, disabled_ = 0, priorityPending_ = 0, catchUpUntil_ = 0;
