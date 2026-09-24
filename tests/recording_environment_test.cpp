@@ -178,13 +178,62 @@ void presetDefaults() {
         observed.windows = {window(app)};
         require(environment.snapshot().captureAllowed, "Defaults blocked an optional preset, game or unrelated app");
     }
-    auto config = options(); config.excludedApps.clear();
+    auto config = options(); config.excludedApps.clear(); config.skippedApps.clear();
     environment.configure(config);
     for (const auto &app : removableDefaults) {
         observed.windows = {window(app)};
         require(environment.snapshot().captureAllowed, "Explicit empty app list did not opt out of a removable default");
     }
     std::cout << "PASS privacy/Steam defaults, optional presets, exact identities, display scope and explicit opt-out\n";
+}
+
+void skipApps() {
+    auto observed = ready();
+    replay::RecordingEnvironment environment([&] { return observed; });
+    auto config = options(); config.skippedApps = {"mpv", "steam", "omarchy-replay"};
+    environment.configure(config);
+    for (const auto &field : {"class", "initialClass"}) {
+        auto client = window("fixture.other"); client[field] = "mpv";
+        observed.windows = {client};
+        auto snapshot = environment.snapshot();
+        require(!snapshot.captureAllowed && snapshot.reason == "excluded_window", "Skip-only app did not suspend Replay");
+        require(snapshot.visibleWindows[0].toObject()["exclusion_mode"] == "skip", "Skip-only app was reported as strict");
+        client["at"] = QJsonArray{2000, 50}; observed.windows = {client};
+        require(environment.snapshot().captureAllowed, "Skip-only app on another display suspended Replay");
+        client["at"] = QJsonArray{1800, 50}; observed.windows = {client};
+        require(!environment.snapshot().captureAllowed, "Skip-only app straddling displays was missed");
+        client["hidden"] = true; observed.windows = {client};
+        require(environment.snapshot().captureAllowed, "Hidden skipped app suspended Replay");
+        client["hidden"] = false; client["visible"] = false; observed.windows = {client};
+        require(environment.snapshot().captureAllowed, "Skipped app on inactive workspace suspended Replay");
+    }
+    for (const auto &app : {"chromium", "google-chrome", "zoom", "mpv.fixture", "SteamGame"}) {
+        auto meeting = window(app); meeting["title"] = "Google Meet: mpv Steam screen share";
+        observed.windows = {meeting};
+        require(environment.snapshot().captureAllowed, "App exclusion matched meeting content or a longer ID");
+    }
+    observed.windows = {window("omarchy-replay")};
+    auto snapshot = environment.snapshot();
+    require(snapshot.captureAllowed && snapshot.visibleWindows[0].toObject()["exclusion_mode"] == "strict",
+            "Skip-only entry disabled Replay's mask-without-pause exception");
+    config.excludedApps.append("mpv"); environment.configure(config);
+    observed.windows = {window("mpv")};
+    require(environment.snapshot().visibleWindows[0].toObject()["exclusion_mode"] == "strict",
+            "Skip-only entry weakened an existing strict app exclusion");
+    config.excludedApps.removeAll("mpv");
+    config.excludedWindows = {{"invoice", "mpv", "", "output"}}; environment.configure(config);
+    require(environment.snapshot().visibleWindows[0].toObject()["exclusion_mode"] == "strict",
+            "Skip-only entry weakened an existing strict window rule");
+    config.excludedWindows.clear(); config.skippedApps.clear(); environment.configure(config);
+    require(environment.snapshot().captureAllowed, "Removing skipped app did not restore recording eligibility");
+    config.skippedApps = {"invalid\nidentifier"};
+    require(!replay::RecordingEnvironment::validateOptions(config).isEmpty(), "Multiline skip identifier accepted");
+    config.skippedApps.clear();
+    while (config.excludedApps.size() + config.skippedApps.size() < 64) config.skippedApps.append("fixture.skip");
+    require(replay::RecordingEnvironment::validateOptions(config).isEmpty(), "64 combined exclusions rejected");
+    config.skippedApps.append("one.too.many");
+    require(!replay::RecordingEnvironment::validateOptions(config).isEmpty(), "Combined exclusion bound ignored");
+    std::cout << "PASS skip-only app visibility, meeting content, strict precedence and separate recording policy\n";
 }
 
 void screensaver() {
@@ -339,7 +388,7 @@ int main(int argc, char **argv) {
             return result.reason == "ready" || result.reason == "excluded_window" || result.reason == "locked" ||
                 result.reason == "exclusions_unverified" ? 0 : 1;
         }
-        lifecycle(); unknowns(); outputs(); exclusions(); presetDefaults(); screensaver(); safetyGeneration(); diagnostics(); events();
+        lifecycle(); unknowns(); outputs(); exclusions(); presetDefaults(); skipApps(); screensaver(); safetyGeneration(); diagnostics(); events();
     } catch (const std::exception &error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return 0;
 }

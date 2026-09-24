@@ -199,6 +199,7 @@ int main(int argc, char **argv) {
     if (gui) app = std::make_unique<QApplication>(argc, argv);
     else app = std::make_unique<QCoreApplication>(argc, argv);
     app->setApplicationName("Omarchy Replay");
+    app->setApplicationVersion(REPLAY_VERSION);
     if (command == "daemon") {
         std::signal(SIGINT, stop); std::signal(SIGTERM, stop);
         try {
@@ -211,12 +212,14 @@ int main(int argc, char **argv) {
         // The viewer's compositor exclusion must not hide synthetic fixtures.
         guiApp->setDesktopFileName(command == "view" ? "omarchy-replay" : "omarchy-replay-fixture");
     QCommandLineParser p;
-    p.setApplicationDescription("Finite local recall experiments. No autostart, audio, uploads, or model calls.");
+    p.setApplicationDescription("Local screen history and searchable text. Recording is explicitly controlled with daemon commands.");
     p.addHelpOption();
+    p.addVersionOption();
     p.addPositionalArgument("command", "demo | record | outputs | fixture | export-fixture | index | service | prioritize | catch-up | status | search | list | extract | view");
     p.addPositionalArgument("query", "Literal search words (search command only)", "[query...]");
     p.addOptions({
         {{"d", "dir"}, "New recording directory, or existing dataset for search/view.", "path", "runs/demo"},
+        {"settings", "View only: open settings in this history's viewer."},
         {"codec", "webp, h264, hevc, h264-vaapi, or hevc-vaapi.", "codec", "webp"},
         {"device", "VAAPI render device.", "path", "/dev/dri/renderD128"},
         {"interval", "Normal capture interval in seconds (0.25–60).", "seconds", "2"},
@@ -298,6 +301,8 @@ int main(int argc, char **argv) {
         if (p.isSet("no-ocr-reuse")) schedulerArguments << "--no-ocr-reuse";
         if (p.isSet("index-while-viewing") && command != "view")
             throw std::runtime_error("--index-while-viewing is only supported by view");
+        if (p.isSet("settings") && command != "view")
+            throw std::runtime_error("--settings is only supported by view");
         const QString ocrMode = p.value("ocr-mode");
         if (ocrMode != "full" && ocrMode != "incremental" && ocrMode != "regions")
             throw std::runtime_error("--ocr-mode must be full, incremental or regions");
@@ -524,7 +529,7 @@ int main(int argc, char **argv) {
                 if (interrupted) QCoreApplication::quit();
             });
             interruptionPoll.start();
-            const int result = replay::showViewer(directory);
+            const int result = replay::showViewer(directory, p.isSet("settings"));
             if (worker) worker->stop();
             return result;
         }

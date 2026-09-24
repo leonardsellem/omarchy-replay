@@ -33,6 +33,7 @@ struct ReplayConfig {
     int idleSeconds = 60;
     bool loginStartup = false;
     QStringList excludedApps = defaultAppExclusions();
+    QStringList skippedApps = defaultSkippedApps();
     QVector<WindowExclusion> excludedWindows;
     QString preferredAgent;
 };

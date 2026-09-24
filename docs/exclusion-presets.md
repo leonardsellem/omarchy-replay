@@ -1,14 +1,14 @@
 # App exclusion presets
 
-Replay excludes its own window (`omarchy-replay`) and Omarchy's screensaver (`org.omarchy.screensaver`) on every installation. Fresh configurations also exclude the Steam client and the password and authentication apps below. You can remove those optional entries in Settings.
+Replay excludes its own window (`omarchy-replay`) and Omarchy's screensaver (`org.omarchy.screensaver`) on every installation. Fresh configurations skip the Steam client in Replay and hide the password and authentication apps below from screenshots and sharing. You can remove those optional entries in Settings.
 
 To add a group to an existing installation, open **Settings → Exclusions**, choose a preset, select **Add preset**, then **Save**. Adding a preset keeps your current entries and removes duplicates. Cancel leaves the saved configuration unchanged.
 
-An explicit `[exclusions] apps` list replaces the defaults. Updates do not silently add entries to that saved list. Replay and the screensaver remain excluded even with `apps = []`.
+`[exclusions] apps` contains privacy masks; `skip_apps` contains recording-only skips. Updates preserve saved entries. A legacy file with `apps` and no `skip_apps` retains its existing behavior. Replay and the screensaver remain protected even with both lists empty. Across both lists, the limit is 64 entries; an overlap counts in each list.
 
 ## Passwords & authentication
 
-These entries are included in fresh configurations and in the **Passwords & authentication** preset.
+These entries are included in fresh configurations and in the **Passwords & authentication** preset. They go into **Hide from screenshots and sharing** (`apps`).
 
 | App | Exact identifiers | Evidence |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ These entries are included in fresh configurations and in the **Passwords & auth
 
 ## Gaming apps
 
-The Steam client is excluded by default. The **Gaming apps** preset also adds the other apps in this table.
+The Steam client is skipped in Replay by default. The **Gaming apps** preset adds all apps in this table to **Skip in Replay** (`skip_apps`), without masking ordinary screenshots or screen sharing.
 
 | App | Exact identifiers | Evidence |
 | --- | --- | --- |
@@ -40,7 +40,7 @@ Games launched through Steam, Lutris or Heroic can have separate identifiers. Ad
 
 ## Media players
 
-The optional **Media players** preset adds `mpv` and `vlc`. mpv's [desktop entry](https://github.com/mpv-player/mpv/blob/master/etc/mpv.desktop) declares `StartupWMClass=mpv`. VLC's [Qt startup code](https://github.com/videolan/vlc/blob/master/modules/gui/qt/qt.cpp) sets its desktop filename from the [package name `vlc`](https://github.com/videolan/vlc/blob/master/configure.ac).
+The optional **Media players** preset adds `mpv` and `vlc` to **Skip in Replay** (`skip_apps`). Phone mirrors can also use `mpv`; leave it out if you want the mirror recorded. These skips do not block ordinary screenshots or sharing. mpv's [desktop entry](https://github.com/mpv-player/mpv/blob/master/etc/mpv.desktop) declares `StartupWMClass=mpv`. VLC's [Qt startup code](https://github.com/videolan/vlc/blob/master/modules/gui/qt/qt.cpp) sets its desktop filename from the [package name `vlc`](https://github.com/videolan/vlc/blob/master/configure.ac).
 
 ## Matching and limits
 
@@ -48,6 +48,8 @@ Replay compares each exact, case-sensitive identifier with both the window's cur
 
 Browser extensions and password-manager pages inside an ordinary browser window are not covered by these native app entries. A title rule or a separate browser-app identity may be needed; **Copy exclusions prompt** can help your coding agent configure it.
 
-An excluded app pauses capture while potentially visible on the recorded display, even if it is unfocused. Replay's own window is masked without pausing capture. The compositor masks can also hide matching windows from other screen-sharing tools while Replay is stopped. Exclusions apply to future captures and do not delete existing history.
+Both kinds pause capture while a matching app is potentially visible on the recorded display, even if unfocused. Privacy masks (`apps` and window rules) also hide pixels from other capture tools, even while Replay is stopped. Recording-only skips rely on window metadata and pre/post capture checks; they are not a secrecy guarantee for closing animations or popups. Replay's own window is masked without pausing capture. An entry in both lists stays masked. Moving an existing mask to a skip requires deliberately removing its `apps` entry; adding a preset never weakens an existing mask. Exclusions affect future captures and do not delete existing history.
+
+An incoming Meet/Zoom screen share belongs to the local browser or meeting window. Replay does not match app identities shown within that video. Meetings remain recordable at the normal interval unless a local exclusion or another capture gate blocks the selected display.
 
 See [recording and configuration](background-recording.md#exclusions) for window rules, TOML configuration and reload behavior.

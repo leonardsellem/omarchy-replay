@@ -24,14 +24,14 @@ DEFAULT_APPS = [
     'Proton Pass', 'Enpass', 'QtPass', 'qtpass', 'org.gnome.World.Secrets',
     'com.belmoussaoui.Authenticator', 'com.github.paolostivanin.OTPClient',
     'com.yubico.yubioath', 'org.gnome.Seahorse', 'seahorse', 'Seahorse',
-    'steam', 'Steam',
 ]
+DEFAULT_SKIPPED_APPS = ['steam', 'Steam']
 MAX_CONFIG = 256 * 1024
 
 
 def text(value, name, limit, default=''):
     value = default if value is None else value
-    if not isinstance(value, str) or len(value) > limit or '\x00' in value:
+    if not isinstance(value, str) or len(value) > limit or '\x00' in value or '\n' in value or '\r' in value:
         raise RuntimeError('Invalid exclusion ' + name + '.')
     return value
 
@@ -45,12 +45,16 @@ def read_policy(path):
     table = document.get('exclusions', {})
     if not isinstance(table, dict):
         raise RuntimeError('Exclusions must be a TOML table.')
-    apps, windows = table.get('apps', DEFAULT_APPS), table.get('windows', [])
-    if not isinstance(apps, list) or len(apps) > 64 or not isinstance(windows, list) or len(windows) > 64:
+    apps = table.get('apps', DEFAULT_APPS)
+    skipped_apps = table.get('skip_apps', [] if 'apps' in table else DEFAULT_SKIPPED_APPS)
+    windows = table.get('windows', [])
+    if (not isinstance(apps, list) or not isinstance(skipped_apps, list) or len(apps) + len(skipped_apps) > 64
+            or not isinstance(windows, list) or len(windows) > 64):
         raise RuntimeError('Exclusion lists exceed their limits.')
     apps = sorted(set(text(app, 'application identifier', 256) for app in apps)
                   | {'omarchy-replay', 'org.omarchy.screensaver'})
-    if '' in apps:
+    skipped_apps = sorted(set(text(app, 'application identifier', 256) for app in skipped_apps))
+    if '' in apps or '' in skipped_apps:
         raise RuntimeError('Excluded application identifiers cannot be empty.')
     rules = []
     for item in windows:
@@ -68,7 +72,7 @@ def read_policy(path):
             if not rule['app_id'] and not rule['title_regex']:
                 raise RuntimeError('Address-only exclusions need an application or title rule for compositor masking.')
         rules.append(rule)
-    return {'apps': apps, 'windows': rules}, hashlib.sha256(data).hexdigest()
+    return {'apps': apps, 'skip_apps': skipped_apps, 'windows': rules}, hashlib.sha256(data).hexdigest()
 
 
 def exact_pattern(value):
@@ -141,7 +145,7 @@ def render_rules(policy):
             # satisfying its other matchers, not only a possibly reused address.
             broadened += 1
         append(rule['app_id'], rule['title_regex'])
-    token = hashlib.sha256(b'oma-replay-mask-v1\0' + canonical + b'\0' + '\n'.join(lines).encode()).hexdigest()
+    token = hashlib.sha256(b'oma-replay-mask-v2\0' + canonical + b'\0' + '\n'.join(lines).encode()).hexdigest()
     lines.append('_G.oma_replay_capture_exclusions = ' + lua_string(token))
     return ('\n'.join(lines) + '\n').encode('utf-8'), token, broadened
 

@@ -2,6 +2,7 @@
 set -euo pipefail
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$project_dir"
+export PYTHONDONTWRITEBYTECODE=1
 if [[ $# == 0 ]]; then
   exec python3 "$project_dir/scripts/open_replay.py"
 fi
@@ -13,14 +14,34 @@ if [[ $1 == desktop-entry ]]; then
   shift
   exec python3 "$project_dir/scripts/open_replay.py" --print-desktop-entry "$@"
 fi
-if [[ $1 == install ]]; then
+if [[ $1 == install || $1 == setup || $1 == update ]]; then
   shift
   exec python3 "$project_dir/scripts/install_recording_service.py" "$@"
 fi
+if [[ $1 == uninstall ]]; then
+  shift
+  exec python3 "$project_dir/scripts/install_recording_service.py" --uninstall "$@"
+fi
 if [[ ${1:-} == build ]]; then
+  if [[ ! -f CMakeLists.txt || -f runtime-manifest.json ]]; then
+    echo 'Installed Replay cannot build source. Reinstall or update Omarchy Replay.' >&2
+    exit 1
+  fi
   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
   cmake --build build -j 2
   exit
+fi
+if [[ -f runtime-manifest.json || -d bin ]]; then
+  if [[ ! -x bin/replay ]]; then
+    echo 'Installed Replay executable is missing. Reinstall Omarchy Replay.' >&2
+    exit 1
+  fi
+  export OMP_THREAD_LIMIT=1
+  exec ./bin/replay "$@"
+fi
+if [[ ! -f CMakeLists.txt ]]; then
+  echo 'Replay source files are unavailable. Reinstall Omarchy Replay.' >&2
+  exit 1
 fi
 if [[ ! -x build/replay ]]; then
   "$0" build >&2

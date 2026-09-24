@@ -504,11 +504,13 @@ RecordingEnvironment::~RecordingEnvironment() = default;
 QString RecordingEnvironment::validateOptions(const EnvironmentOptions &options) {
     if (options.output.isEmpty() || options.output.size() > 256 || options.output.contains(QRegularExpression("[\\x00-\\x20/\\\\]")))
         return "Select one named display output.";
-    if (options.excludedApps.size() > 64 || options.excludedWindows.size() > 64) return "Too many exclusion rules.";
+    if (options.excludedApps.size() + options.skippedApps.size() > 64 || options.excludedWindows.size() > 64)
+        return "Too many exclusion rules.";
     if (!options.exclusionMaskToken.isEmpty() && !QRegularExpression("^[0-9a-f]{64}$").match(options.exclusionMaskToken).hasMatch())
         return "Invalid compositor exclusion receipt.";
-    for (const auto &app : options.excludedApps)
-        if (app.isEmpty() || app.size() > 256 || app.contains(QChar('\0'))) return "Invalid excluded application identifier.";
+    for (const auto &app : options.excludedApps + options.skippedApps)
+        if (app.isEmpty() || app.size() > 256 || app.contains(QChar('\0')) || app.contains('\n') || app.contains('\r'))
+            return "Invalid excluded application identifier.";
     for (const auto &rule : options.excludedWindows) {
         if (rule.scope != "output") return "Only whole-output window exclusions are supported.";
         if (rule.appId.isEmpty() && rule.titleRegex.isEmpty() && rule.address.isEmpty()) return "A window exclusion needs a matcher.";
@@ -637,8 +639,9 @@ EnvironmentSnapshot RecordingEnvironment::snapshot() {
         if (!QRectF(x, y, w, h).intersects(displayBounds)) continue;
         const auto app = window.value("class").toString(), initialApp = window.value("initialClass").toString();
         const auto title = window.value("title").toString(), address = window.value("address").toString().toLower();
-        bool excluded = d->options.excludedApps.contains(app) || d->options.excludedApps.contains(initialApp);
-        bool pause = excluded && app != "omarchy-replay" && initialApp != "omarchy-replay";
+        bool strict = d->options.excludedApps.contains(app) || d->options.excludedApps.contains(initialApp);
+        const bool skipped = d->options.skippedApps.contains(app) || d->options.skippedApps.contains(initialApp);
+        bool pause = (strict || skipped) && app != "omarchy-replay" && initialApp != "omarchy-replay";
         for (const auto &rule : d->options.excludedWindows) {
             if (!rule.appId.isEmpty() && rule.appId != app && rule.appId != initialApp) continue;
             if (!rule.address.isEmpty() && rule.address != address) continue;
@@ -647,12 +650,14 @@ EnvironmentSnapshot RecordingEnvironment::snapshot() {
                 if (!match.isValid()) { malformed = true; break; }
                 if (!match.hasMatch()) continue;
             }
-            excluded = true;
+            strict = true;
             pause = true;
         }
         if (malformed) break;
+        const bool excluded = strict || skipped;
         result.visibleWindows.append(QJsonObject{{"address", address}, {"app_id", app}, {"initial_app_id", initialApp},
-            {"title", title}, {"excluded", excluded}, {"at", window.value("at")}, {"size", window.value("size")}});
+            {"title", title}, {"excluded", excluded}, {"exclusion_mode", strict ? "strict" : skipped ? "skip" : ""},
+            {"at", window.value("at")}, {"size", window.value("size")}});
         if (excluded && !result.excludedApps.contains(app)) result.excludedApps.append(app);
         excludedVisible = excludedVisible || pause;
     }

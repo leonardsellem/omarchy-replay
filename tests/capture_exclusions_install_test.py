@@ -2,6 +2,7 @@
 """Synthetic configuration transactions; never mutates the desktop."""
 from pathlib import Path
 import re
+import json
 import sys
 import tempfile
 import unittest
@@ -76,12 +77,13 @@ class CaptureExclusionsTest(unittest.TestCase):
             rule = installer.render_rules(policy)[0].decode()
             self.assertIn('com.belmoussaoui.Authenticator', policy['apps'])
             self.assertIn('Bitwarden', policy['apps'])
+            self.assertEqual(set(policy['skip_apps']), {'steam', 'Steam'})
             for app in installer.DEFAULT_APPS:
                 self.assertIn(app, policy['apps'])
                 literal = re.escape(app).replace(r'\ ', ' ').replace(r'\-', '-').replace('\\', '\\092')
                 for field in ('class', 'initial_class'):
                     self.assertEqual(rule.count('  match = { ' + field + ' = "^' + literal + '$" },\n'), 1)
-            for optional in ('net.lutris.Lutris', 'heroic', 'com.libretro.RetroArch',
+            for optional in ('steam', 'Steam', 'net.lutris.Lutris', 'heroic', 'com.libretro.RetroArch',
                              'com.moonlight_stream.Moonlight', 'mpv', 'vlc'):
                 self.assertNotIn(optional, policy['apps'])
         for apps in ('[]', '["fixture.editor"]'):
@@ -89,9 +91,64 @@ class CaptureExclusionsTest(unittest.TestCase):
             policy, _ = installer.read_policy(self.policy)
             rule = installer.render_rules(policy)[0].decode()
             self.assertEqual(set(policy['apps']), mandatory | ({'fixture.editor'} if apps != '[]' else set()))
+            self.assertEqual(policy['skip_apps'], [])
             for app in removable:
                 self.assertNotIn(app, policy['apps'])
             self.assertEqual(rule.count('no_screen_share = true'), len(policy['apps']) * 2)
+
+    def test_skip_apps_do_not_create_masks_and_cannot_weaken_strict_apps(self):
+        self.policy.write_text('[exclusions]\napps=["fixture.private"]\nskip_apps=["mpv", "Steam"]\n')
+        policy, _ = installer.read_policy(self.policy)
+        data, original_token, _ = installer.render_rules(policy)
+        rule = data.decode()
+        self.assertEqual(policy['skip_apps'], ['Steam', 'mpv'])
+        self.assertNotIn('mpv', rule)
+        self.assertNotIn('Steam', rule)
+        self.assertEqual(rule.count('no_screen_share = true'), len(policy['apps']) * 2)
+        with patch.object(installer, 'hyprctl', side_effect=self.command):
+            self.install()
+            self.policy.write_text('[exclusions]\napps=["fixture.private", "mpv"]\nskip_apps=["mpv", "Steam"]\n')
+            changed = self.install()
+            self.assertNotEqual(changed['mask_token'], original_token)
+            self.assertTrue(changed['changed'])
+            self.assertIn('class = "^mpv$"', self.rule.read_text())
+            self.assertIn('initial_class = "^mpv$"', self.rule.read_text())
+            self.assertNotIn('Steam', self.rule.read_text())
+            self.policy.write_text('[exclusions]\napps=["fixture.private"]\nskip_apps=["mpv", "Steam"]\n')
+            self.install()
+            self.assertNotIn('mpv', self.rule.read_text())
+            self.assertTrue(self.install(check=True)['validated'])
+
+        # Even a change only to skipped IDs must invalidate the accepted policy
+        # receipt, although it adds no compositor masks.
+        self.policy.write_text('[exclusions]\napps=["fixture.private"]\nskip_apps=[]\n')
+        policy, _ = installer.read_policy(self.policy)
+        data, token, _ = installer.render_rules(policy)
+        self.assertNotEqual(token, original_token)
+        self.assertNotIn('mpv', data.decode())
+
+    def test_skip_apps_validation_and_full_legacy_policy(self):
+        self.policy.write_text('[exclusions]\napps=["mpv", "Steam"]\n')
+        policy, _ = installer.read_policy(self.policy)
+        self.assertEqual(policy['skip_apps'], [])
+        self.assertIn('class = "^mpv$"', installer.render_rules(policy)[0].decode())
+        self.assertIn('class = "^Steam$"', installer.render_rules(policy)[0].decode())
+        legacy = ['fixture.legacy.' + str(index) for index in range(64)]
+        self.policy.write_text('[exclusions]\napps=' + json.dumps(legacy) + '\n')
+        policy, _ = installer.read_policy(self.policy)
+        self.assertEqual(policy['skip_apps'], [])
+        self.assertTrue(set(legacy).issubset(policy['apps']))
+        for source in ('skip_apps="mpv"', 'skip_apps=[4]', 'skip_apps=[""]',
+                       'skip_apps=["line\\nbreak"]', 'skip_apps=[' + json.dumps('a' * 257) + ']'):
+            self.policy.write_text('[exclusions]\napps=[]\n' + source + '\n')
+            with self.assertRaises(RuntimeError):
+                installer.read_policy(self.policy)
+        self.policy.write_text('[exclusions]\napps=' + json.dumps(legacy[:32]) + '\nskip_apps=' + json.dumps(legacy[32:]) + '\n')
+        policy, _ = installer.read_policy(self.policy)
+        self.assertEqual(len(policy['skip_apps']), 32)
+        self.policy.write_text('[exclusions]\napps=' + json.dumps(legacy[:32]) + '\nskip_apps=' + json.dumps(legacy[32:] + ['extra']) + '\n')
+        with self.assertRaises(RuntimeError):
+            installer.read_policy(self.policy)
 
     def test_screensaver_masks_cannot_be_removed_by_custom_apps(self):
         for apps in ('[]', '["fixture.editor"]', '["org.omarchy.screensaver"]'):

@@ -73,6 +73,18 @@ void read(const toml::table* table, const char* key, QString& destination) {
     destination = QString::fromStdString(*value);
 }
 
+void read(const toml::table* table, const char* key, QStringList& destination) {
+    if (!table || !table->contains(key)) return;
+    const auto* apps = table->get(key)->as_array();
+    if (!apps) invalid(QString("exclusions.%1 must be an array of exact app identifiers").arg(key));
+    destination.clear();
+    for (const auto& app : *apps) {
+        const auto name = app.value<std::string>();
+        if (!name) invalid(QString("exclusions.%1 identifiers must be strings").arg(key));
+        destination.append(QString::fromStdString(*name));
+    }
+}
+
 void read(const toml::table* table, const char* key, int& destination) {
     if (!table || !table->contains(key)) return;
     if (!table->get(key)->is_integer()) invalid(QString::fromUtf8(key) + " must be an integer");
@@ -131,8 +143,9 @@ void validateReplayConfig(const ReplayConfig& config) {
     bounded(config.cpuCeilingPercent, 0, 100, "cpu_ceiling_percent");
     if (config.cpuCeilingPercent > 0 && config.cpuCeilingPercent < 1) invalid("cpu_ceiling_percent must be 0 or at least 1");
     bounded(config.idleSeconds, 1, 3600, "idle_seconds");
-    if (config.excludedApps.size() > 64 || config.excludedWindows.size() > 64) invalid("at most 64 app exclusions and 64 window rules are allowed");
-    for (const auto& app : config.excludedApps) {
+    if (config.excludedApps.size() + config.skippedApps.size() > 64 || config.excludedWindows.size() > 64)
+        invalid("at most 64 combined apps and skip_apps entries and 64 window rules are allowed");
+    for (const auto& app : config.excludedApps + config.skippedApps) {
         shortText(app, 256, "excluded app");
         if (app.isEmpty()) invalid("excluded app identifiers cannot be empty");
     }
@@ -177,16 +190,11 @@ ReplayConfigDocument loadReplayConfig(const QString& path) {
     read(section(table, "service"), "login_startup", config.loginStartup);
     read(section(table, "agent"), "preferred", config.preferredAgent);
     if (const auto* exclusions = section(table, "exclusions")) {
-        if (const auto* node = exclusions->get("apps")) {
-            const auto* apps = node->as_array();
-            if (!apps) invalid("exclusions.apps must be an array of exact app identifiers");
-            config.excludedApps.clear();
-            for (const auto& app : *apps) {
-                const auto name = app.value<std::string>();
-                if (!name) invalid("excluded app identifiers must be strings");
-                config.excludedApps.append(QString::fromStdString(*name));
-            }
-        }
+        // An existing explicit app list is authoritative. Do not add newly
+        // introduced skip defaults or invalidate a full legacy 64-app policy.
+        if (exclusions->contains("apps") && !exclusions->contains("skip_apps")) config.skippedApps.clear();
+        read(exclusions, "apps", config.excludedApps);
+        read(exclusions, "skip_apps", config.skippedApps);
         if (const auto* node = exclusions->get("windows")) {
             const auto* windows = node->as_array();
             if (!windows) invalid("exclusions.windows must be an array of tables");
@@ -248,6 +256,9 @@ void saveReplayConfig(const ReplayConfig& config, const QByteArray& expectedOrig
     toml::array apps;
     for (const auto& app : config.excludedApps) apps.push_back(app.toStdString());
     exclusions.insert_or_assign("apps", std::move(apps));
+    toml::array skippedApps;
+    for (const auto& app : config.skippedApps) skippedApps.push_back(app.toStdString());
+    exclusions.insert_or_assign("skip_apps", std::move(skippedApps));
     toml::array windows;
     const auto* oldWindows = exclusions.get_as<toml::array>("windows");
     QVector<bool> reused(oldWindows ? oldWindows->size() : 0, false);

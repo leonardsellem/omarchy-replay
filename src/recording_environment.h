@@ -16,6 +16,7 @@ struct EnvironmentOptions {
     // An empty identity is pinned to the first verified selected output.
     QString outputIdentity;
     QStringList excludedApps = defaultAppExclusions();
+    QStringList skippedApps = defaultSkippedApps();
     QVector<WindowExclusion> excludedWindows;
     // Successful compositor installer receipt; verified again before retention.
     QString exclusionMaskToken;

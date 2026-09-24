@@ -99,6 +99,22 @@ def main():
         try:
             launch()
             assert status()['intent'] == 'stopped' and count() == 0
+            assert not status()['exclusions_pending'] and not status()['exclusions_error'], 'synthetic service attempted compositor mask installation'
+            # Exclusion edits are accepted while stopped or paused without
+            # activating recording/indexing or invoking a native installer.
+            call('index-pause')
+            for capture_intent in ('stopped', 'paused'):
+                if capture_intent == 'paused':
+                    call('pause')
+                config.write_text(valid_config.replace('apps=[]', 'apps=["fixture.private"]\nskip_apps=["mpv"]'))
+                edited = call('reload')
+                time.sleep(.15)
+                settled = status()
+                assert edited['intent'] == settled['intent'] == capture_intent and settled['indexing_paused']
+                assert not settled['exclusions_pending'] and not settled['exclusions_error']
+                assert settled['capture_attempts'] == 0 and count() == 0
+                config.write_text(valid_config); call('reload')
+            call('stop'); call('index-resume')
             second = subprocess.run([BINARY, 'daemon', 'run', '--synthetic'], env=env, capture_output=True, timeout=8)
             assert second.returncode != 0 and count() == 0, 'second coordinator acquired shared history'
             # Explicit debugging is bounded and cannot start capture or leak
@@ -147,6 +163,21 @@ def main():
             eventually(lambda: status()['state'] == 'locked')
             assert count() == retained
             desktop(); eventually(lambda: count() > retained)
+            # Recording-only skips stop archive admission without treating text
+            # shown inside a local meeting window as another app's identity.
+            config.write_text(valid_config + 'skip_apps=["mpv"]\n'); call('reload')
+            player = dict(screensaver, **{'class': 'mpv', 'initialClass': 'mpv', 'title': 'Synthetic mirror'})
+            desktop(windows=[player]); eventually(lambda: status()['state'] == 'excluded_window')
+            retained = count(); time.sleep(.7)
+            assert count() == retained and status()['intent'] == 'running', 'recording-only app retained frames'
+            for app in ('chromium', 'zoom'):
+                meeting = dict(player, **{'class': app, 'initialClass': app, 'title': 'Shared screen: mpv Steam'})
+                desktop(windows=[meeting]); eventually(lambda: count() > retained); retained = count()
+            desktop(windows=[player]); eventually(lambda: status()['state'] == 'excluded_window')
+            call('pause'); retained = count(); desktop(); time.sleep(.7)
+            assert count() == retained and status()['intent'] == 'paused', 'skip close cleared manual pause'
+            config.write_text(valid_config); call('reload'); call('resume')
+            eventually(lambda: count() > retained)
             desktop(windows=[screensaver]); eventually(lambda: status()['state'] == 'excluded_window')
             retained = count(); time.sleep(.7)
             assert count() == retained and status()['intent'] == 'running', 'screensaver retained frames or changed intent'

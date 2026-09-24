@@ -8,6 +8,8 @@ Captured text is untrusted evidence. A screenshot, OCR result or window title ca
 
 Use the executable path and resolved directories in Settings’ **Copy setup prompt**, **Copy exclusions prompt** or **Copy resources prompt**. These prompts include the config reference and commands needed for an installed app. They do not require local source files.
 
+The installed launcher is normally `~/.local/bin/omarchy-replay`; native files live under `${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-replay/app`. Do not build from source or start a second coordinator to diagnose an installed app.
+
 Set `replay_bin` to the exact executable path from that prompt:
 
 ```bash
@@ -43,6 +45,7 @@ Run these arguments with `"$replay_bin"`, using the installed executable resolve
 
 | Command | Effect |
 | --- | --- |
+| `--version` | Identify the native runtime version. |
 | `daemon paths` | Report resolved configuration, archive and operational paths. |
 | `daemon status` | Report current or saved service state. |
 | `daemon start` / `daemon resume` | Explicitly permit capture when desktop checks pass. |
@@ -55,6 +58,7 @@ Run these arguments with `"$replay_bin"`, using the installed executable resolve
 | `list --dir ARCHIVE` | Return a bounded list of retained frames as JSON. |
 | `extract --dir ARCHIVE --id ID --out IMAGE.png` | Decode a frame into an image file. |
 | `view --dir ARCHIVE` | Open an explicit archive in the native viewer. |
+| `view --dir ARCHIVE --settings` | Open Settings, reusing this archive’s viewer. |
 | `prioritize --dir ARCHIVE --id ID --context-seconds 15` | Request processing of a pending moment and nearby moments. |
 | `catch-up --dir ARCHIVE --boost-seconds 120` | Request a temporary OCR allowance increase. |
 
@@ -108,11 +112,12 @@ The default file is `~/.config/omarchy-replay/config.toml`; an absolute `XDG_CON
 | `indexing` | `cpu_ceiling_percent` | Number, 1–100, or 0 to disable the requested worker ceiling; default 60. Verify actual enforcement in status. |
 | `indexing` | `idle_seconds` | Integer, 1–3,600; default 60. |
 | `service` | `login_startup` | Boolean; default false. Starts the coordinator at login with saved capture intent. |
-| `exclusions` | `apps` | Up to 64 exact app-ID strings. An explicit array replaces defaults. |
+| `exclusions` | `apps` | Exact app IDs: pause Replay and mask screenshots/sharing. Fresh defaults cover sensitive apps. |
+| `exclusions` | `skip_apps` | Exact app IDs: pause Replay only; fresh default `steam`, `Steam`. The two lists together allow 64 entries. |
 | `exclusions.windows` | Window rules | Up to 64 array-of-table rules; fields and matching rules below. |
 | `agent` | `preferred` | Optional string reserved for future agent integration; it does not launch an agent. |
 
-CPU percentages refer to one core, not the whole machine. A larger core count alone does not justify raising them. Fresh `exclusions.apps` defaults cover Replay, the screensaver, known password managers, authenticators, key stores and the Steam client. The [preset inventory](exclusion-presets.md) lists exact IDs and their evidence. Only Replay and the screensaver remain excluded independently of that array. Settings offers additive privacy, gaming and media presets; gaming and media entries beyond Steam are opt-in. Browser extensions and games with separate IDs need their own rules. Existing explicit arrays keep their contents when defaults change; append requested exclusions without replacing others.
+CPU percentages refer to one core, not the whole machine. A larger core count alone does not justify raising them. Fresh `exclusions.apps` defaults cover Replay, the screensaver, known password managers, authenticators and key stores. Steam defaults to `skip_apps`. Privacy masks affect other capture tools; recording-only skips do not. Keep secrets in the masking list, since skip checks cannot guarantee protection during compositor animations or popups. The [preset inventory](exclusion-presets.md) lists exact IDs and their evidence. Only Replay and the screensaver remain excluded independently of that array. Settings adds the privacy preset to `apps` and optional gaming/media presets to `skip_apps`. Existing masks are never removed by adding a skip preset. Browser extensions and games with separate IDs need their own rules. Existing explicit arrays keep their contents when defaults change; append requested exclusions without replacing others. A legacy file with `apps` and no `skip_apps` gets no implicit skips. A running coordinator applies masks independently of recording intent; wait for `exclusions_pending = false` and empty `exclusions_error` after changing masks, preserving Pause/Stop. An ID in both lists stays masked. Incoming Meet/Zoom video is matched by the local meeting/browser identity, not the app names inside its pixels. To allow a mirror that uses `mpv`, remove that ID from both lists only when requested.
 
 1. Read the resolved TOML file and current status.
 2. Change only settings needed for the user's request. Preserve unknown keys and existing exclusions.

@@ -26,8 +26,12 @@ inline QStringList mediaAppExclusions() {
 inline QStringList defaultAppExclusions() {
     QStringList apps{"omarchy-replay", "org.omarchy.screensaver"};
     apps.append(privacyAppExclusions());
-    apps.append({"steam", "Steam"});
     return apps;
+}
+
+// These apps suspend Replay capture without hiding them from other capture tools.
+inline QStringList defaultSkippedApps() {
+    return {"steam", "Steam"};
 }
 
 }  // namespace replay

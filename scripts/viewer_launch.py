@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from runtime_layout import native_binary
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -85,7 +86,7 @@ def process_view(pid, binary):
     """Match the actual executable and supported view argv, never a window title."""
     if type(pid) is not int or pid <= 0:
         return None
-    expected = ROOT / 'build/replay' if Path(binary).resolve() == ROOT / 'scripts/replay' else Path(binary).resolve()
+    expected = native_binary(ROOT) if Path(binary).resolve() == ROOT / 'scripts/replay' else Path(binary).resolve()
     process = Path('/proc') / str(pid)
     try:
         if (process / 'exe').resolve(strict=True) != expected:
@@ -99,6 +100,7 @@ def process_view(pid, binary):
         parser.add_argument('command', choices=('view',))
         parser.add_argument('-d', '--dir', required=True)
         parser.add_argument('--index-while-viewing', action='store_true')
+        parser.add_argument('--settings', action='store_true')
         parser.add_argument('--no-ocr-reuse', action='store_true')
         parser.add_argument('--ocr-reuse', action='store_true')
         for option in ('scheduler', 'ocr-mode', 'ocr-data-path', 'ocr-max-height', 'ocr-cpu-percent',
@@ -164,7 +166,7 @@ def focus_existing(dataset, binary, require_indexing=False, toggle=False):
     return False
 
 
-def launch_viewer(binary, dataset, config, toggle=False):
+def launch_viewer(binary, dataset, config, toggle=False, settings=False):
     dataset = Path(dataset).expanduser().resolve()
     if not (dataset / 'index.sqlite').is_file():
         raise RuntimeError('This history has no saved index yet. Finish a trial before opening it.')
@@ -175,6 +177,9 @@ def launch_viewer(binary, dataset, config, toggle=False):
     # The independent service now owns indexing. A plain existing viewer is
     # sufficient, and closing it cannot stop background processing.
     command = [str(binary), 'view', '--dir', str(dataset)]
-    if focus_existing(dataset, binary, toggle=True) if toggle else focus_existing(dataset, binary):
+    if settings:
+        command.append('--settings')
+    focused = focus_existing(dataset, binary, toggle=True) if toggle and not settings else focus_existing(dataset, binary)
+    if focused and not settings:
         return 0
     return subprocess.call(command, env=dict(os.environ, OMP_THREAD_LIMIT='1'))

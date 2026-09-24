@@ -25,6 +25,6 @@ struct ViewerServiceHooks {
     std::function<SelectionOcrResult(const QImage&, const std::shared_ptr<std::atomic_bool>&)> selectionOcr;
 };
 std::unique_ptr<QWidget> createViewer(const QString& datasetDirectory, ViewerServiceHooks services = {});
-int showViewer(const QString& datasetDirectory);
+int showViewer(const QString& datasetDirectory, bool settings = false);
 
 }  // namespace replay

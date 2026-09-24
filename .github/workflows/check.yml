@@ -1,0 +1,40 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      # Arch supplies the current Wayland staging protocols used by capture.
+      image: archlinux:base-devel@sha256:8745817f349ed24373341ddb92776209eeec3f0364ea48f7f645ac5800d30a50
+    env:
+      QT_QPA_PLATFORM: offscreen
+      OMP_THREAD_LIMIT: "1"
+    steps:
+      - name: Install system build and test dependencies
+        run: >-
+          pacman -Syu --noconfirm --needed
+          git cmake pkgconf python qt6-base qt6-wayland qt6-declarative
+          tomlplusplus tesseract tesseract-data-eng leptonica sqlite
+          libwebp wayland wayland-protocols ffmpeg ttf-dejavu
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test synthetic history
+        # Native user-service tests remain opt-in on an Omarchy test host.
+        run: ctest --test-dir build --output-on-failure

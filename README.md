@@ -5,6 +5,7 @@ Find things you saw on your screen. Omarchy Replay records one selected display,
 - Search visible text, including partial words as you type.
 - Browse moments with the keyboard and copy highlighted OCR lines.
 - Drag over a saved image to recognize and copy text from that area.
+- Open history, settings and recording controls from the top bar.
 - Keep recording and indexing in the background with separate controls.
 - Adjust capture rate, retention, storage location and CPU allowances.
 - Pause capture when locked, asleep, or the selected display is unavailable.
@@ -15,9 +16,23 @@ Find things you saw on your screen. Omarchy Replay records one selected display,
 
 ## Open and configure
 
-Open **Omarchy Replay** from your app launcher, or use **Super+Alt+R** if the Replay shortcut is installed. Press **Esc** to leave search, then **I → Settings** to choose a display and review storage. Choose **Start recording** when ready. Closing the viewer leaves recording and indexing unchanged.
+Click the history icon in the top bar for **Open history**, **Settings** and recording controls. You can also open **Omarchy Replay** from your app launcher or use **Super+Alt+R**. Press **Esc** to leave search, then **I → Settings** to choose a display and review storage. Choose **Start recording** when ready. Closing the viewer leaves recording and indexing unchanged.
 
-An installed Replay app has its own executable and config files. You do not need a source checkout to use it or ask your coding agent to configure it. The current repository's [source installation](#source-installation-and-development) is for development; packaged plugin distribution is still being prepared.
+Replay installs its native runtime outside the plugin folder. You do not need a development checkout to use it or ask your coding agent to configure it. The launcher is `~/.local/bin/omarchy-replay`; configuration and history survive an app update.
+
+## Install the plugin
+
+Marketplace submission and public release are still pending. For a repository installation on a supported Omarchy system, install the [dependencies](#source-installation-and-development), then:
+
+```bash
+omarchy plugin add https://github.com/rblalock/omarchy-replay.git --enable
+```
+
+Click Replay’s history icon in the bar and choose **Set up Replay**. Setup opens a terminal, builds the native app with two compiler jobs, and installs its service, launcher and shortcut. It does not install system packages. Fresh setup leaves recording stopped and login startup off; choose your display in Settings before starting.
+
+If **Super+Alt+R** is already used, setup stops before changing your installation. Run the plugin’s `scripts/plugin_control.py setup-run` from a terminal after resolving the conflict, or follow the source install command with `--no-shortcut`.
+
+After `omarchy plugin update io.github.rblalock.omarchy-replay`, use the bar’s **Update Replay** action when available. Updating the shell plugin alone does not replace the native app. See [installation and removal](docs/installation.md) for the exact paths, manual update command and recovery behavior.
 
 ## Keyboard controls
 
@@ -28,10 +43,10 @@ To change that shortcut, find Replay's existing entry in `~/.config/hypr/binding
 If you need to add a binding, use this shape with the launcher command from your installed Replay integration:
 
 ```lua
-o.bind("SUPER + ALT + R", "Omarchy Replay", "<installed Replay launcher command>")
+o.bind("SUPER + ALT + R", "Omarchy Replay", "~/.local/bin/omarchy-replay open --toggle --notify-errors")
 ```
 
-Replace the placeholder; it is not an executable name. The launcher command supplies summon/dismiss behavior and can differ by installation. Apply the change with `hyprctl reload`, then check `hyprctl configerrors`. Source installations can pass `--no-shortcut` on future installs to preserve a custom binding.
+Use the absolute launcher path from your installed binding if your home directory needs quoting. The `--toggle` option supplies summon/dismiss behavior. Apply the change with `hyprctl reload`, then check `hyprctl configerrors`. Updates preserve a customized key when the marked binding uses the installed launcher. Manual installs can pass `--no-shortcut` to leave bindings untouched.
 
 | Key | Action |
 | --- | --- |
@@ -64,7 +79,9 @@ You can choose another local disk in Settings. Switching folders leaves the prev
 
 Storage rolls forward: Replay removes the oldest history as new moments need space, and expires anything older than the selected age. The **I** panel and Settings estimate how much history the chosen allowance can hold. Adjusting the size previews its capacity from your recent usage; calendar-day estimates need at least a week of retained history.
 
-For storage rules, exclusions and the full TOML example, read the [recording and configuration guide](docs/background-recording.md). Earlier installations used the name `oma-rewind`; the installer handles that migration as described in the guide.
+Exclusions separate **Skip in Replay** from **Hide from screenshots and sharing**. Game/media presets use the first; sensitive-app defaults use the second. Incoming Meet/Zoom screen shares remain recordable as visible content in the local meeting window.
+
+For storage rules, exclusions and the full TOML example, read the [recording and configuration guide](docs/background-recording.md). Earlier installations used `oma-rewind`; migrate those paths before installing this release, as described in the guide.
 
 ## Use with your coding agent
 
@@ -87,18 +104,21 @@ TOML options: [recording] output, output_identity, interval_seconds;
 [storage] directory, retention_days, max_disk_mib, min_free_mib;
 [indexing] active_cpu_percent, idle_cpu_percent, request_cpu_percent,
 pressure_cpu_percent, cpu_ceiling_percent, idle_seconds;
-[service] login_startup; [exclusions] apps; [[exclusions.windows]] app_id,
+[service] login_startup; [exclusions] apps, skip_apps; [[exclusions.windows]] app_id,
 title_regex, scope, address, compositor_instance. [agent] preferred is reserved.
 CPU percentages describe one core. An empty storage directory uses the default;
 switching folders leaves the old archive in place. Shortening retention or reducing storage can delete
 older history. New moments replace the oldest history as the allowance fills. Exclusion app IDs are exact; window matchers in one rule are
 ANDed, scope is "output", and address rules need compositor_instance plus an app
 or title guard. omarchy-replay and org.omarchy.screensaver remain excluded with an
-empty apps array. Preserve existing entries and unknown keys.
+empty apps and skip_apps arrays. apps and window rules mask ordinary screenshots
+and sharing too; skip_apps only pauses Replay. Use skips for reducing history,
+not secrets. Existing legacy apps-only files stay unchanged until deliberately
+edited. Preserve existing entries and unknown keys.
 Supported ranges: interval_seconds 0.25-60; retention_days integer 1-3650;
 max_disk_mib integer 64-1048576; min_free_mib integer 0-1048576; active/idle/request
 CPU 1-100; pressure CPU 1-active_cpu_percent; ceiling CPU 0 or 1-100; idle_seconds
-integer 1-3600. login_startup is boolean. At most 64 app IDs and 64 window rules.
+integer 1-3600. login_startup is boolean. At most 64 entries across apps and skip_apps, plus 64 window rules.
 Custom storage must be an existing, user-owned, empty or Replay archive folder on
 a local filesystem, with a clean absolute path and no folder symlink.
 Optional full reference: https://github.com/rblalock/omarchy-replay/blob/main/docs/agent-guide.md.
@@ -128,7 +148,7 @@ Desktop integration targets Omarchy’s Lua-based Hyprland configuration. On Arc
 
 ```bash
 sudo pacman -S --needed base-devel cmake pkgconf python qt6-base \
-  tomlplusplus tesseract tesseract-data-eng leptonica sqlite libwebp \
+  qt6-wayland tomlplusplus tesseract tesseract-data-eng leptonica sqlite libwebp \
   wayland wayland-protocols ffmpeg
 ```
 
@@ -143,7 +163,7 @@ cd omarchy-replay
 ./scripts/replay
 ```
 
-Replace `YOUR_OUTPUT` with a display name from `outputs`. Installation adds a user service, app launcher and **Super+Alt+R** shortcut. It leaves recording and login startup off. The launcher uses this checkout, so keep it in place.
+Replace `YOUR_OUTPUT` with a display name from `outputs`. Installation adds a user service, app launcher and **Super+Alt+R** shortcut. A fresh installation leaves recording and login startup off. Updates preserve the existing recording and indexing choices. The installed service and launcher use the versioned runtime, so the development checkout can be moved or removed.
 
 To try fictional history before recording your screen:
 
@@ -163,4 +183,23 @@ ctest --test-dir build --output-on-failure
 REPLAY_TEST_RESOURCE_SCOPE=1 ctest --test-dir build --output-on-failure
 ```
 
-Tests use fictional history. Keep recordings, OCR text, logs, credentials and generated output out of Git. Review diagnostics before sharing them. A project license has not been selected yet.
+Tests use fictional history. Keep recordings, OCR text, logs, credentials and generated output out of Git. Review diagnostics before sharing them.
+
+## Release status and removal
+
+The plugin manifest, versioned runtime, transactional installer and native uninstaller are implemented. The [release plan](docs/release-readiness.md) tracks verification and remaining clean-machine/publication work. The repository has not been made public or submitted to the marketplace.
+
+Close Replay’s viewer windows, then remove the native app **before** removing the shell plugin:
+
+```bash
+~/.local/bin/omarchy-replay uninstall
+omarchy plugin remove io.github.rblalock.omarchy-replay
+```
+
+Uninstall removes Replay’s service, launcher, shortcut and compositor rules. It preserves configuration, history and custom storage, and saves stopped recording intent. Removing or disabling the shell plugin by itself leaves the native recorder installed; use **Stop recording** first if you want capture to stop. See [installation and removal](docs/installation.md).
+
+The GitHub workflow is configured to build and run synthetic tests on Arch; its first remote run is still pending. Native compositor and user-service checks also require an Omarchy test session; CI is not proof of a working marketplace installation.
+
+## License
+
+Replay's original code is available under the [MIT license](LICENSE). Dependencies and incorporated protocol definitions retain their own terms; see [third-party notices](THIRD_PARTY_NOTICES.md).

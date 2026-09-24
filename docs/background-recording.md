@@ -77,13 +77,28 @@ Calendar estimates require at least seven retained days. A small allowance may n
 
 Replay's own window and Omarchy's screensaver (`org.omarchy.screensaver`) are always excluded, even with a customized or empty app list. Replay's window is masked. The screensaver pauses capture while visible on the recorded display; closing it resumes capture only if recording was running and the session, display and other checks pass. Manual Pause/Stop stays in effect. OCR can continue while the computer is awake.
 
-Fresh defaults also exclude known native identities for 1Password, Bitwarden, KeePassXC, Proton Pass, Enpass, QtPass, GNOME Secrets, GNOME Authenticator, OTPClient, Yubico Authenticator, Seahorse and the Steam client. These entries are removable. See the [preset inventory](exclusion-presets.md) for exact IDs, sources and build limitations. Browser extensions use their browser's identity and are not covered by these native-app entries.
+Settings separates two kinds of exclusions:
 
-An existing explicit app list stays as saved when defaults change. Under **Settings → Exclusions**, select **Passwords & authentication**, **Gaming apps** or **Media players**, then choose **Add preset** and **Save**. Presets append missing IDs and preserve your other entries. Cancel leaves the file unchanged. Gaming and media presets are optional; launcher exclusions do not cover every game.
+| Control | Effect |
+| --- | --- |
+| **Skip in Replay** (`skip_apps`) | Pause Replay while a matching app is visible on the recorded display. Ordinary screenshots and screen sharing remain available. Use this to reduce unwanted history, not to protect secrets. |
+| **Hide from screenshots and sharing** (`apps`, plus window rules) | Pause Replay and mask the matching window through the compositor. These masks also affect other capture tools, even while Replay is stopped. Use this for sensitive content. |
 
-In Exclusions, **Choose visible app…** and **Choose visible window…** fill in current desktop identifiers when available. An app exclusion is the simplest way to keep all windows of that app out of future captures. For more specific rules, use a window title pattern or **Copy exclusions prompt** and describe the rule to your coding agent.
+Both lists match exact current or initial app identifiers, including unfocused or overlapping windows. If an app appears in both, the stronger masking rule still applies. Remove it from both lists to allow Replay to record it.
 
-Other excluded windows pause capture when potentially visible on the selected display, including unfocused or overlapping windows. Compositor masks protect matching pixels during transitions. Those masks also affect other screen-sharing tools that honor Hyprland's `no_screen_share`, even while Replay is stopped.
+Fresh privacy defaults include known native identities for 1Password, Bitwarden, KeePassXC, Proton Pass, Enpass, QtPass, GNOME Secrets, GNOME Authenticator, OTPClient, Yubico Authenticator and Seahorse. Steam is skipped in Replay by default. These entries are removable; Replay and the screensaver remain mandatory. See the [preset inventory](exclusion-presets.md) for exact IDs and build limitations.
+
+Under **Settings → Exclusions**, choose a preset, **Add preset**, then **Save**. Passwords & authentication adds privacy masks; Gaming apps and Media players add Replay-only skips. Presets preserve existing entries, including any older masks. To change an existing masked app to a skip, move its identifier between the lists and Save. Cancel leaves the file unchanged.
+
+**Choose visible app…** fills the Skip in Replay list from current desktop identifiers. **Choose visible window…** creates a privacy rule. For more specific rules, use a title pattern or **Copy exclusions prompt** and describe the intended behavior to your coding agent.
+
+### Mirrors and incoming screen shares
+
+A phone mirror may use a general-purpose player such as `mpv`. Skipping or masking `mpv` applies to that mirror too. Leave it out of both lists if you want its contents in Replay.
+
+A screen shared with you in Google Meet or Zoom appears as pixels inside your local browser or meeting window. Replay can retain it at the normal capture interval; it does not identify or exclude apps inside the shared video. Browsers and meeting apps are not excluded by default. The meeting must be visible on the selected display, with recording running and no excluded local window blocking that display. This remains screenshot history, not continuous meeting video or audio.
+
+Browser extensions and password-manager pages inside an ordinary browser window are also not covered by native password-manager IDs.
 
 Nonempty fields in one window rule are ANDed; different rules are alternatives. Address-specific rules require an app/title guard and the current compositor instance. Reselect them after a compositor restart. Their compositor masks use the broader app/title match, which can hide other matching windows too.
 
@@ -128,14 +143,16 @@ idle_seconds = 60
 login_startup = false
 
 [exclusions]
-# Omit apps to use the fresh defaults listed in exclusion-presets.md.
-# To supply your own list, uncomment and edit; it replaces the defaults.
-# apps = ["example.private-app"]
+# Omit both lists to use fresh defaults from exclusion-presets.md.
+# apps = ["example.private-app"] # Hide from screenshots/sharing and pause Replay.
+# skip_apps = ["example.game"] # Pause Replay only.
 ```
 
-An explicit `apps` list replaces configured defaults. Replay and screensaver exclusions are enforced separately. Saved `recording.output_identity` is maintained after display verification. An address rule also stores `compositor_instance`.
+An explicit list replaces its own defaults. Legacy files with `apps` and no `skip_apps` keep their existing policy, with no added skips. Each list may be empty; at most 64 entries are allowed across both. Replay and screensaver exclusions are enforced separately. Saved `recording.output_identity` is maintained after display verification. An address rule also stores `compositor_instance`.
 
 The parser validates types, ranges and window patterns. Native writes preserve unknown TOML values and refuse to overwrite a concurrent edit. Unknown extension fields in a window rule may require direct editing when the native editor cannot preserve their meaning.
+
+A running coordinator applies accepted mask changes even while recording is paused or stopped. Status reports `exclusions_pending` until they finish and `exclusions_error` if verification fails; retries back off. The recording choice stays unchanged. An offline coordinator must run before it can update compositor rules.
 
 After a direct edit, run `"$replay_bin" daemon paths` and check that `config_error` is empty and `using_last_valid_config` is false. If the coordinator is running, run `"$replay_bin" daemon reload` and check status again. Leave an offline coordinator offline unless you intend to start it; offline reload starts the coordinator with capture held and can change saved running intent to paused. The coordinator keeps its last valid settings if the new file is invalid. The launcher can still open that archive and Settings can copy a repair prompt. Settings saved through the viewer request reload automatically.
 
@@ -168,9 +185,9 @@ The state directory also holds bounded `recording.log`, one rotation and an inde
 
 ## Source installations and legacy trials
 
-The repository’s development installer runs from a source checkout; packaged plugin distribution is still being prepared. See [source installation](../README.md#source-installation-and-development) for build requirements and commands. That installer adds the app launcher, service and shortcut without enabling fresh recording or login startup. Keep a source-installed checkout in place because its launcher and service reference that location.
+The [plugin installation guide](installation.md) covers explicit native setup, updates and removal. The installed launcher and service use a standalone versioned payload outside the plugin folder. A development checkout can be moved or removed after installation.
 
-Earlier source builds used the directory and unit name `oma-rewind`. From that development checkout, run `./scripts/replay install` to upgrade. The installer renames existing XDG configuration, data, state and cache directories to `omarchy-replay`, preserving recordings and saved intent. It leaves compatibility symlinks for old paths and loaded desktop rules, and replaces the old user unit. If old and new locations conflict, it refuses to merge them automatically. See installer output before removing old paths.
+Earlier builds used the directory and unit name `oma-rewind`. This release accepts compatibility symlinks left by an already completed migration. If real legacy directories or the old unit remain, setup refuses to move them as part of an app update. Complete the migration with the earlier installer before upgrading; it preserves recordings and intent and refuses conflicting old/new locations. Native uninstall preserves current configuration and history.
 
 Development trials remain separate: shared history does not import or expire finite recordings under `runs/trials/`. Open a trial from its source checkout:
 

@@ -9,6 +9,11 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QCryptographicHash>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QLockFile>
+#include <QPointer>
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDialog>
@@ -61,6 +66,8 @@
 #include <atomic>
 #include <cmath>
 #include <exception>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace replay {
 namespace {
@@ -300,6 +307,8 @@ private:
     QRect sourceSelection() const {
         if (selection_.isEmpty() || image.isNull() || width() <= 0 || height() <= 0) return {};
         const double sx = double(image.width()) / width(), sy = double(image.height()) / height();
+        // Enclose every selected pixel. At fractional fit scales, translating a
+        // fixed-size widget rectangle can change its integer crop extent by one.
         const int left = std::clamp(int(std::floor(selection_.left() * sx)), 0, image.width());
         const int top = std::clamp(int(std::floor(selection_.top() * sy)), 0, image.height());
         const int right = std::clamp(int(std::ceil(selection_.right() * sx)), left, image.width());
@@ -749,15 +758,16 @@ public:
         connect(resourcePrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Resources); });
 
         auto* exclusionLayout = makePage("&Exclusions", "exclusionSettingsScroll");
-        exclusionLayout->addWidget(note("Matching windows pause capture while visible on the recorded display. Replay is always hidden; the screensaver always pauses capture."));
-        section(exclusionLayout, "Apps");
-        auto* appLabel = note("Exact app identifiers, one per line");
-        apps_ = new QPlainTextEdit; apps_->setObjectName("settingExcludedApps");
-        apps_->setMinimumHeight(76); apps_->setMaximumHeight(95); apps_->setTabChangesFocus(true); appLabel->setBuddy(apps_);
-        exclusionLayout->addWidget(appLabel); exclusionLayout->addWidget(apps_);
+        exclusionLayout->addWidget(note("Exact app IDs, one per line. Replay and the screensaver stay protected."));
+        section(exclusionLayout, "Skip in Replay");
+        exclusionLayout->addWidget(note("Pauses Replay only. Screenshots and sharing stay visible; not a privacy guarantee."));
+        skippedApps_ = new QPlainTextEdit; skippedApps_->setObjectName("settingSkippedApps");
+        skippedApps_->setAccessibleName("Apps to skip in Replay only");
+        skippedApps_->setMinimumHeight(60); skippedApps_->setMaximumHeight(76); skippedApps_->setTabChangesFocus(true);
+        exclusionLayout->addWidget(skippedApps_);
         auto* chooseApp = new QPushButton("Choose visible app…");
         chooseApp->setObjectName("chooseExcludedApp"); chooseApp->setEnabled(!visibleWindows_.isEmpty());
-        chooseApp->setToolTip("Choose from windows on the selected recording display");
+        chooseApp->setToolTip("Add an app to Skip in Replay; screenshots and sharing remain visible");
         exclusionLayout->addWidget(chooseApp, 0, Qt::AlignLeft);
         connect(chooseApp, &QPushButton::clicked, this, [this] {
             QStringList names;
@@ -769,9 +779,15 @@ public:
             names.sort();
             if (names.isEmpty()) return;
             bool accepted = false;
-            const QString selected = chooseItem(this, "Exclude an app", "Pause capture whenever this app is visible", names, accepted);
-            if (accepted && !apps_->toPlainText().split('\n').contains(selected)) apps_->appendPlainText(selected);
+            const QString selected = chooseItem(this, "Skip an app in Replay", "Pause Replay when this app is visible; keep screenshots and sharing unchanged", names, accepted);
+            if (accepted) addAppExclusions(skippedApps_, {selected});
         });
+        section(exclusionLayout, "Hide from screenshots and sharing");
+        exclusionLayout->addWidget(note("Pauses Replay and masks these apps in screenshots and screen sharing."));
+        apps_ = new QPlainTextEdit; apps_->setObjectName("settingExcludedApps");
+        apps_->setAccessibleName("Apps hidden from screenshots and sharing");
+        apps_->setMinimumHeight(76); apps_->setMaximumHeight(95); apps_->setTabChangesFocus(true);
+        exclusionLayout->addWidget(apps_);
         auto* presetRow = new QHBoxLayout;
         auto* preset = new QComboBox;
         preset->setObjectName("exclusionPreset"); preset->setAccessibleName("App exclusion preset");
@@ -784,27 +800,16 @@ public:
         addPreset->setObjectName("addExclusionPreset"); addPreset->setAutoDefault(false);
         presetRow->addWidget(preset, 1); presetRow->addWidget(addPreset);
         exclusionLayout->addLayout(presetRow);
-        exclusionLayout->addWidget(note("Adds to your list. Save to apply. Gaming apps do not cover every game."));
+        exclusionLayout->addWidget(note("Passwords add screenshot protection; games and media skip Replay only. Save to apply."));
+        exclusionLayout->addWidget(note("Gaming apps do not cover every game. Existing screenshot protection stays in place."));
         connect(addPreset, &QPushButton::clicked, this, [this, preset] {
             const QString id = preset->currentData().toString();
             const QStringList additions = id == "privacy" ? privacyAppExclusions()
                 : id == "gaming" ? gamingAppExclusions() : mediaAppExclusions();
-            QStringList merged;
-            for (const auto& line : apps_->toPlainText().split('\n')) {
-                const QString app = line.trimmed();
-                if (!app.isEmpty() && !merged.contains(app)) merged.append(app);
-            }
-            for (const auto& app : additions) if (!merged.contains(app)) merged.append(app);
-            auto saved = merged;
-            for (const QString& required : {"omarchy-replay", "org.omarchy.screensaver"})
-                if (!saved.contains(required)) saved.append(required);
-            const QString limitError = "This preset would exceed the limit of 64 app exclusions, including Replay and the screensaver. Remove some entries before adding it.";
-            if (saved.size() > 64) { showError(limitError); return; }
-            apps_->setPlainText(merged.join('\n'));
-            if (error_->text() == limitError) showError({});
+            addAppExclusions(id == "privacy" ? apps_ : skippedApps_, additions);
         });
         section(exclusionLayout, "Window rules");
-        exclusionLayout->addWidget(note("All filled fields must match. Title patterns use regular expressions."));
+        exclusionLayout->addWidget(note("Screenshot protection; all filled fields must match. Title patterns use regular expressions."));
         windows_ = new QTableWidget(0, 3);
         windows_->setObjectName("settingExcludedWindows");
         windows_->setHorizontalHeaderLabels({"Exact app", "Title pattern", "Window address"});
@@ -895,6 +900,7 @@ public:
             editableApps.removeAll("omarchy-replay");
             editableApps.removeAll("org.omarchy.screensaver");
             apps_->setPlainText(editableApps.join('\n'));
+            skippedApps_->setPlainText(config.skippedApps.join('\n'));
             for (const auto& rule : config.excludedWindows) {
                 const int row = windows_->rowCount(); windows_->insertRow(row);
                 windows_->setItem(row, 0, new QTableWidgetItem(rule.appId));
@@ -985,6 +991,26 @@ private:
         capacity_->setToolTip(!currentStorageStatus(shown, replayHistoryDirectory(saved)) ? QString()
             : measured.value("estimate_note").toString());
     }
+    static QStringList appEntries(QPlainTextEdit* editor) {
+        QStringList entries;
+        for (const auto& line : editor->toPlainText().split('\n')) {
+            const QString app = line.trimmed();
+            if (!app.isEmpty() && !entries.contains(app)) entries.append(app);
+        }
+        return entries;
+    }
+    void addAppExclusions(QPlainTextEdit* target, const QStringList& additions) {
+        auto merged = appEntries(target);
+        for (const auto& app : additions) if (!merged.contains(app)) merged.append(app);
+        auto strict = target == apps_ ? merged : appEntries(apps_);
+        const auto skipped = target == skippedApps_ ? merged : appEntries(skippedApps_);
+        for (const QString& required : {"omarchy-replay", "org.omarchy.screensaver"})
+            if (!strict.contains(required)) strict.append(required);
+        const QString limitError = "These entries would exceed the combined limit of 64 app exclusions, including Replay and the screensaver. Remove some entries first.";
+        if (strict.size() + skipped.size() > 64) { showError(limitError); return; }
+        target->setPlainText(merged.join('\n'));
+        if (error_->text() == limitError) showError({});
+    }
     void copyAgentPrompt(AgentPromptTopic topic) {
         auto shown = document_.config;
         shown.intervalSeconds = interval_->value();
@@ -993,6 +1019,10 @@ private:
         shown.activeCpuPercent = budgets_[0]->value(); shown.idleCpuPercent = budgets_[1]->value();
         shown.requestCpuPercent = budgets_[2]->value(); shown.pressureCpuPercent = budgets_[3]->value();
         shown.cpuCeilingPercent = budgets_[4]->value(); shown.idleSeconds = idle_->value();
+        shown.skippedApps = appEntries(skippedApps_);
+        shown.excludedApps = appEntries(apps_);
+        for (const QString& required : {"omarchy-replay", "org.omarchy.screensaver"})
+            if (!shown.excludedApps.contains(required)) shown.excludedApps.prepend(required);
         const AgentPromptContext context{QCoreApplication::applicationFilePath(), replayPaths(),
             replayHistoryDirectory(document_.config), shown, configEditable_};
         QApplication::clipboard()->setText(configurationAgentPrompt(topic, context));
@@ -1011,6 +1041,7 @@ private:
         config.activeCpuPercent = budgets_[0]->value(); config.idleCpuPercent = budgets_[1]->value();
         config.requestCpuPercent = budgets_[2]->value(); config.pressureCpuPercent = budgets_[3]->value();
         config.cpuCeilingPercent = budgets_[4]->value(); config.idleSeconds = idle_->value();
+        config.skippedApps = appEntries(skippedApps_);
         config.excludedApps = {"omarchy-replay", "org.omarchy.screensaver"};
         for (const auto& line : apps_->toPlainText().split('\n'))
             if (!line.trimmed().isEmpty() && !config.excludedApps.contains(line.trimmed())) config.excludedApps.append(line.trimmed());
@@ -1073,7 +1104,7 @@ private:
     QSpinBox *days_ = nullptr, *disk_ = nullptr, *free_ = nullptr, *idle_ = nullptr;
     QCheckBox* login_ = nullptr;
     QVector<QDoubleSpinBox*> budgets_;
-    QPlainTextEdit* apps_ = nullptr;
+    QPlainTextEdit *apps_ = nullptr, *skippedApps_ = nullptr;
     QTableWidget* windows_ = nullptr;
     QLabel* error_ = nullptr;
     QDialogButtonBox* buttons_ = nullptr;
@@ -1581,6 +1612,11 @@ public:
 
     ~Viewer() override { finishWork(); }
 
+    void summon(bool settings) {
+        showNormal(); raise(); activateWindow();
+        if (settings) showSettings();
+    }
+
 protected:
     void closeEvent(QCloseEvent* event) override {
         finishWork();
@@ -1746,7 +1782,9 @@ private:
     }
 
     void showSettings() {
+        if (settingsDialog_) { settingsDialog_->raise(); settingsDialog_->activateWindow(); return; }
         SettingsDialog settings(this, recording_, services_.displays);
+        settingsDialog_ = &settings;
         if (settings.exec() == QDialog::Accepted) requestRecording("reload");
     }
 
@@ -2495,6 +2533,7 @@ private:
     bool indexerRunning_ = false;
     qint64 oldestPendingMs_ = 0;
     QJsonObject service_, servicePolicy_;
+    QPointer<QDialog> settingsDialog_;
     QString requestMessage_;
     QSet<qint64> requestedMoments_;
     HistorySnapshot requestedHistory_;
@@ -2539,9 +2578,63 @@ std::unique_ptr<QWidget> createViewer(const QString& datasetDirectory, ViewerSer
     return std::make_unique<Viewer>(datasetDirectory, std::move(services));
 }
 
-int showViewer(const QString& datasetDirectory) {
-    auto viewer = createViewer(datasetDirectory);
+int showViewer(const QString& datasetDirectory, bool settings) {
+    // A per-history endpoint lets a bar action open settings in the existing
+    // viewer, including while its modal settings dialog is already open.
+    const auto runtime = replayPaths().runtimeDirectory;
+    struct stat metadata{};
+    if (QFileInfo(runtime).isSymLink() || !QDir().mkpath(runtime) ||
+        ::lstat(QFile::encodeName(runtime).constData(), &metadata) != 0 ||
+        !S_ISDIR(metadata.st_mode) || metadata.st_uid != ::geteuid() ||
+        !QFile::setPermissions(runtime, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner))
+        throw std::runtime_error("Viewer controls require a private runtime directory");
+    const auto canonical = QFileInfo(datasetDirectory).canonicalFilePath();
+    if (canonical.isEmpty()) throw std::runtime_error("History directory is unavailable");
+    const auto key = QString::fromLatin1(QCryptographicHash::hash(canonical.toUtf8(), QCryptographicHash::Sha256).toHex().left(24));
+    const auto endpoint = runtime + "/view-" + key + ".sock";
+    const auto summonExisting = [&] {
+        QLocalSocket client;
+        client.connectToServer(endpoint);
+        if (!client.waitForConnected(250)) return false;
+        client.write(settings ? "settings\n" : "open\n");
+        if (!client.waitForBytesWritten(500) || !client.waitForReadyRead(1500) || client.readAll() != "ok\n")
+            throw std::runtime_error("The existing Replay viewer did not respond");
+        return true;
+    };
+    if (summonExisting()) return 0;
+    QLockFile lease(runtime + "/view-" + key + ".lock");
+    lease.setStaleLockTime(0);
+    if (!lease.tryLock(1500)) {
+        if (summonExisting()) return 0;
+        throw std::runtime_error("This history's viewer is starting or unresponsive");
+    }
+    QLocalServer::removeServer(endpoint);
+    QLocalServer server;
+    server.setSocketOptions(QLocalServer::UserAccessOption);
+    if (!server.listen(endpoint)) throw std::runtime_error("Cannot open Replay viewer controls");
+    auto viewer = std::make_unique<Viewer>(canonical, ViewerServiceHooks{});
+    QObject::connect(&server, &QLocalServer::newConnection, viewer.get(), [&] {
+        while (auto* client = server.nextPendingConnection()) {
+            client->setParent(&server);
+            client->setReadBufferSize(32);
+            auto* deadline = new QTimer(client);
+            deadline->setSingleShot(true);
+            QObject::connect(deadline, &QTimer::timeout, client, &QLocalSocket::abort);
+            QObject::connect(client, &QLocalSocket::disconnected, client, &QObject::deleteLater);
+            deadline->start(1500);
+            const auto receive = [client, target = viewer.get()] {
+                if (!client->canReadLine()) return;
+                const auto command = client->readLine(32);
+                if (command != "open\n" && command != "settings\n") { client->abort(); return; }
+                client->write("ok\n"); client->flush(); client->disconnectFromServer();
+                QTimer::singleShot(0, target, [target, command] { target->summon(command == "settings\n"); });
+            };
+            QObject::connect(client, &QLocalSocket::readyRead, viewer.get(), receive);
+            receive();
+        }
+    });
     viewer->show();
+    if (settings) QTimer::singleShot(0, viewer.get(), [&] { viewer->summon(true); });
     return QApplication::exec();
 }
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from trial import ROOT, read_json, selected_trial
+from runtime_layout import ROOT, read_json, selected_trial
 from viewer_launch import launch_viewer
 
 
@@ -16,9 +16,9 @@ def xdg_path(name, fallback):
     return Path(value) if value and Path(value).is_absolute() else fallback
 
 
-def desktop_entry():
+def desktop_entry(executable=None):
     # Desktop Entry quoting is deliberately separate from shell quoting.
-    executable = str(ROOT / 'scripts/replay')
+    executable = str(executable or ROOT / 'scripts/replay')
     for character in ('\\', '"', '`', '$'):
         executable = executable.replace(character, '\\' + character)
     executable = executable.replace('%', '%%')
@@ -45,6 +45,7 @@ def main(argv=None):
     selection.add_argument('--trial', type=Path, help='a previous trial directory')
     parser.add_argument('--runs-dir', type=Path)
     parser.add_argument('--toggle', action='store_true', help='dismiss this history if its viewer is focused')
+    parser.add_argument('--settings', action='store_true', help='open Replay settings')
     parser.add_argument('--binary', type=Path, default=ROOT / 'scripts/replay', help=argparse.SUPPRESS)
     parser.add_argument('--notify-errors', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--print-desktop-entry', action='store_true', help=argparse.SUPPRESS)
@@ -88,9 +89,14 @@ def main(argv=None):
             dataset = trial / 'dataset'
             metadata = read_json(trial / 'trial.json')
         config = metadata.get('config', {}) if isinstance(metadata, dict) else {}
-        result = launch_viewer(args.binary, dataset, config, toggle=True) if args.toggle else launch_viewer(args.binary, dataset, config)
+        options = {}
+        if args.toggle:
+            options['toggle'] = True
+        if args.settings:
+            options['settings'] = True
+        result = launch_viewer(args.binary, dataset, config, **options)
         if result:
-            raise RuntimeError(f'The viewer exited with code {result}. Run ./scripts/replay from a terminal for details.')
+            raise RuntimeError(f'The viewer exited with code {result}. Run {args.binary} open from a terminal for details.')
         return 0
     except KeyboardInterrupt:
         return 130

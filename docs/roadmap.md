@@ -1,6 +1,14 @@
 # Omarchy Replay roadmap
 
-Updated 2026-09-23. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
+Updated 2026-09-24. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
+
+## Current priority: release readiness
+
+The user selected MIT and requested preparation for the Omarchy marketplace. The root license and third-party notices are present, and an Arch build/test workflow has been added. The [release plan](release-readiness.md) records the remaining requirements and verified gaps.
+
+Release items 1–3 are implemented: a standalone versioned native runtime with a file manifest, transactional installation/update and history-preserving uninstall, plus a real Omarchy bar widget. Its history icon opens quick actions for the viewer, Settings and recording. Setup is explicit and fresh installation leaves recording off. Omarchy’s plugin manager has no native lifecycle hooks, so updating or removing the native app remains a documented step. See [installation](installation.md).
+
+Validate the complete installed workflow on a separate Omarchy machine/session, review the final outgoing commit and history, and prepare an exact-commit submission. The repository remains private. Publication, visibility changes and marketplace submission are separate steps. Agent-assisted recall remains the next product feature after this release work.
 
 ## Milestones 1–5: implemented locally
 
@@ -10,17 +18,17 @@ Updated 2026-09-23. This records implemented behavior, remaining validation and 
 | 2. Background recorder and configuration | `omarchy-replay.service`, durable running/paused/stopped intent, optional login startup, validated TOML and XDG directories. Fresh installation starts with capture stopped. |
 | 3. Moving retention | Capture-time age window, independent disk/free-space limits, bounded expiry and media cleanup, in-flight indexing protection. The oldest history rolls out as new moments need room within the storage allowance. |
 | 4. Native controls and lifecycle | Super+Alt+R summon/dismiss, recording and indexing controls plus Settings under I, lock/sleep/display/compositor gates and explicit gaps. Temporary conditions never override a manual pause. |
-| 5. Exclusions and deletion | Mandatory Replay/screensaver protection, removable privacy and Steam defaults, optional gaming/media presets, exact app/title rules, window pickers and confirmed delete-recent action. |
+| 5. Exclusions and deletion | Separate Replay-only skips and privacy masks, mandatory Replay/screensaver protection, optional presets, exact app/title rules, window pickers and confirmed delete-recent action. |
 
 The service uses lossless archive-first originals independently of OCR backlog. Prefix search, timeline navigation, OCR highlights and matching-line copy remain available. Adaptive OCR keeps the configured active/idle/request/pressure allowances and verified worker-ceiling reporting. OCR memory is released after catch-up. Legacy finite trials keep their existing indexing policies; they do not share the new coordinator's global worker budget.
 
 These milestones have synthetic storage, lifecycle, configuration and native widget checks. Generated compositor masks have native pixel checks on isolated fictional desktops, including popups, movement, reload and scaling. See [service implementation and verification](background-recording-implementation.md). This does not establish all-day throughput or prove real hardware suspend/resume on every machine.
 
-## Next: exercise the installed service during ordinary work
+## Ongoing: exercise the installed service during ordinary work
 
 Use progressively longer sessions to measure retained observations, oldest pending age, OCR throughput, CPU, memory, disk growth and foreground responsiveness together. Verify actual lock/unlock, sleep/wake and display reconnect during normal use. Revisit unexpected gaps and failures before treating it as an unattended recorder.
 
-Long-history timeline/search scaling and storage growth remain validation priorities. Agent-assisted recall is the next feature area, using the evidence interface described below. S3 offload and synthesis remain later work.
+Long-history timeline/search scaling and storage growth remain validation priorities alongside release preparation. Agent-assisted recall follows packaging and installation proof, using the evidence interface described below. S3 offload and synthesis remain later work.
 
 ### Recording across lock, sleep and restart
 
@@ -53,9 +61,11 @@ A full disk allowance rolls out the oldest observations, including those younger
 
 Replay's viewer and Omarchy's screensaver (`org.omarchy.screensaver`) are always excluded, including with a customized or empty app list. Removable defaults cover known native password managers, authenticators, key stores and Steam. Existing explicit lists are preserved; games with separate identities, browser extensions and alternate builds may require additional rules. Settings accepts exact app IDs and title regular expressions, plus local visible-window pickers. A particular window can be bound to its compositor instance/address only with an app/title guard; stale rules block capture until corrected.
 
-Settings now offers additive **Passwords & authentication**, **Gaming apps** and **Media players** presets. Only the privacy group and Steam are fresh defaults; other gaming/media apps require an explicit addition. The [inventory](exclusion-presets.md) documents source-verified identities and remaining build coverage limits.
+Settings now offers additive **Passwords & authentication**, **Gaming apps** and **Media players** presets. The privacy group defaults to screenshot/sharing masks; Steam defaults to Replay-only skipping. Gaming/media presets add Replay-only skips. Other gaming/media apps require an explicit addition, and preset additions preserve existing masks. The [inventory](exclusion-presets.md) documents source-verified identities and remaining build coverage limits.
 
-For non-Replay exclusions, a matching potentially visible window pauses the selected output. Compositor `no_screen_share` masks also hide matching pixels before storage/OCR, protecting transitions such as animations and popups. Loaded masks are verified before capture. Unsupported patterns or missing verification block recording. App/title masks for address-bound rules deliberately cover other matching windows too; masks also affect other screen-sharing tools that honor this compositor setting, even while Replay is stopped.
+For non-Replay exclusions, a matching potentially visible window pauses the selected output. Privacy apps (`apps`) and window rules also install compositor `no_screen_share` masks, protecting transitions such as animations and popups. Recording-only apps (`skip_apps`) leave other screenshots and screen sharing available; they are a history-reduction control rather than a secrecy guarantee. Loaded masks are verified before capture. Unsupported patterns or missing verification block recording. App/title masks for address-bound rules deliberately cover other matching windows too; masks also affect other screen-sharing tools that honor this compositor setting, even while Replay is stopped.
+
+Accepted mask changes apply while recording is paused/stopped too; no Resume is needed. Incoming Meet/Zoom shares remain ordinary local meeting-window content and are not filtered by remote app names.
 
 Exclusions apply to future captures. Existing history changes only through retention or explicit deletion. Broader password-manager identity coverage, browser private-mode behavior and other capture backends remain future validation/work.
 
@@ -77,7 +87,7 @@ Drag over a saved image and release to recognize and copy the selected text. **S
 
 One bounded, asynchronous OCR job runs per viewer. Navigation, replacement selection and closure cancel stale work. Empty/error/canceled results and results superseded by a newer clipboard change do not overwrite the clipboard. Recognition uses local Tesseract and a memory pipe, with no live desktop recapture or temporary image file. It has its own short-lived resource limits, separate from background indexing.
 
-Synthetic backend and native Qt viewer checks pass, including original-pixel mapping, real crop OCR, cancellation and clipboard protection; see [area text selection](replay-viewer-design.md#area-text-selection-2026-09-22) for evidence and limits. Ordinary-use validation and agent-assisted recall remain the next roadmap priorities.
+Synthetic backend and native Qt viewer checks pass, including original-pixel mapping, real crop OCR, cancellation and clipboard protection; see [area text selection](replay-viewer-design.md#area-text-selection-2026-09-22) for evidence and limits. Ordinary-use validation continues during release preparation; agent-assisted recall follows packaging and installation proof.
 
 ## Agent-assisted recall using the user's coding agents
 
@@ -101,7 +111,7 @@ Recall answers should cite captured moments and distinguish visible evidence fro
 
 The history remains local. If the selected coding agent uses a remote model, its requested evidence follows that configured provider path; a locally installed agent does not necessarily imply local model inference. Send only the evidence needed for the current task.
 
-Agent-assisted recall is the next product milestone after validating the shared-history service. The structured retrieval tools and agent adapter are not implemented yet.
+Agent-assisted recall is the next product milestone after release packaging and installation proof. The structured retrieval tools and agent adapter are not implemented yet.
 
 ### Practical agent workflows to revisit at that milestone
 
@@ -131,7 +141,7 @@ The [post-trial efficiency research](pipeline-efficiency-research.md) proposes s
 
 ## Prototype trials
 
-Use the finite prototype command in [the personal trial guide](personal-trial.md). It collects local diagnostics for recording, indexing and recall. Shared recording, configuration/settings, rolling retention and exclusions are implemented separately from finite trials. Coding-agent integration remains planned. Enabling a trial does not enable login recording. Select a project license before a public release; none has been adopted yet.
+Use the finite prototype command in [the personal trial guide](personal-trial.md). It collects local diagnostics for recording, indexing and recall. Shared recording, configuration/settings, rolling retention and exclusions are implemented separately from finite trials. Coding-agent integration remains planned. Enabling a trial does not enable login recording. MIT covers Replay's original code; retain the third-party notices in release payloads.
 
 ## Capture efficiency and diagnostics — 2026-09-22
 

@@ -93,7 +93,8 @@ RecorderOptions recordingOptions(const ReplayPaths &paths, const ReplayConfig &c
 EnvironmentOptions environmentOptions(const ReplayConfig &config) {
     EnvironmentOptions options;
     options.output = config.output; options.outputIdentity = config.outputIdentity;
-    options.excludedApps = config.excludedApps; options.excludedWindows = config.excludedWindows;
+    options.excludedApps = config.excludedApps; options.skippedApps = config.skippedApps;
+    options.excludedWindows = config.excludedWindows;
     return options;
 }
 
@@ -155,6 +156,11 @@ public:
     QString intent = "stopped", state = "stopped", reason = "Recording is stopped.", configError, indexError;
     QString maskToken, maskInstance, captureInstance, captureDisplay;
     quint64 maskConfigGeneration = 0;
+    bool exclusionsPending = false;
+    QString exclusionError;
+    qint64 nextExclusionAttempt = 0;
+    int exclusionFailures = 0;
+    quint64 exclusionRevision = 0;
     QByteArray indexOutput, indexErrors;
     bool indexingPaused = false, shuttingDown = false, synthetic = false, workerStarted = false;
     bool tickActive = false, historyReady = false;
@@ -241,6 +247,7 @@ public:
             environment->configure(options);
         }
         if (historyReady && lastRetained > 0 && now() > lastRetained) recordGap(paths.historyDirectory, lastRetained, now(), "coordinator-restart");
+        requestExclusions();
         saveIntent();
         log("Recording coordinator started.");
     }
@@ -416,7 +423,7 @@ public:
             if (changedCapture) forecastSampleAfter = now();
             saveIntent();
             ++controlRevision;
-            maskToken.clear();
+            requestExclusions();
             if (environment) {
                 auto options = environmentOptions(document.config); if (synthetic) options.exclusionMaskToken = QString(64, 'a');
                 environment->configure(options);
@@ -461,6 +468,7 @@ public:
         const auto &c = document.config;
         QJsonObject result{{"available", true}, {"running", true}, {"pid", qint64(getpid())}, {"intent", intent},
             {"state", state}, {"reason", reason}, {"config_error", configError}, {"output", c.output},
+            {"exclusions_pending", exclusionsPending}, {"exclusions_error", exclusionError},
             {"progress", progress}, {"usage", usage}, {"retention_days", c.retentionDays}, {"max_disk_mib", c.maxDiskMiB},
             {"min_free_mib", c.minFreeMiB}, {"interval_seconds", c.intervalSeconds},
             {"login_startup", c.loginStartup}, {"indexing_paused", indexingPaused}, {"index_error", indexError},
@@ -480,17 +488,26 @@ public:
         result["storage_forecast"] = storageForecastResult;
         return result;
     }
-    void applyExclusions() {
+    void requestExclusions() {
+        maskToken.clear();
+        exclusionsPending = !synthetic;
+        nextExclusionAttempt = 0; exclusionFailures = 0; exclusionError.clear();
+        ++exclusionRevision;
+    }
+    bool applyExclusions() {
+        const QByteArray original = document.original;
+        const QString instance = desktop.compositorInstance, display = desktop.waylandDisplay;
+        const quint64 revision = exclusionRevision;
         const QString helper = QDir(QFileInfo(QCoreApplication::applicationFilePath()).dir().absolutePath())
                                    .absoluteFilePath("../scripts/install_capture_exclusions.py");
         if (!QFileInfo::exists(helper)) fail("Replay capture-exclusion installer is missing");
         QProcess process;
         auto env = QProcessEnvironment::systemEnvironment();
-        env.insert("HYPRLAND_INSTANCE_SIGNATURE", desktop.compositorInstance);
-        env.insert("WAYLAND_DISPLAY", desktop.waylandDisplay);
+        env.insert("HYPRLAND_INSTANCE_SIGNATURE", instance);
+        env.insert("WAYLAND_DISPLAY", display);
         process.setProcessEnvironment(env);
-        process.start("python3", {helper, "--config", paths.stateDirectory + "/last-valid-config.toml",
-            "--config-home", QFileInfo(paths.configFile).dir().absolutePath() + "/..", "--instance", desktop.compositorInstance});
+        process.start("python3", {"-B", helper, "--config", paths.stateDirectory + "/last-valid-config.toml",
+            "--config-home", QFileInfo(paths.configFile).dir().absolutePath() + "/..", "--instance", instance});
         // Keep controls responsive while the transactional installer reloads or rolls back.
         // Its bounded subprocess calls, including rollback, can take up to 35 seconds.
         QElapsedTimer deadline; deadline.start();
@@ -501,21 +518,48 @@ public:
         }
         const auto output = process.readAllStandardOutput();
         const auto receipt = QJsonDocument::fromJson(output).object();
-        const auto expected = QString::fromLatin1(QCryptographicHash::hash(document.original, QCryptographicHash::Sha256).toHex());
+        // Controls run while the installer is in flight. A newer accepted
+        // configuration must get its own receipt before any capture resumes.
+        if (revision != exclusionRevision || original != document.original) return false;
+        const auto expected = QString::fromLatin1(QCryptographicHash::hash(original, QCryptographicHash::Sha256).toHex());
         if (process.exitCode() != 0 || output.size() > 65536 || !receipt.value("validated").toBool() ||
             receipt.value("config_sha256").toString() != expected ||
-            receipt.value("compositor_instance").toString() != desktop.compositorInstance ||
+            receipt.value("compositor_instance").toString() != instance ||
             !QRegularExpression("^[0-9a-f]{64}$").match(receipt.value("mask_token").toString()).hasMatch())
             fail("Capture exclusions could not be verified. " + QString::fromUtf8(process.readAllStandardError().right(1000)).trimmed());
         maskToken = receipt.value("mask_token").toString();
         auto options = environmentOptions(document.config); options.exclusionMaskToken = maskToken;
         environment->configure(options); desktop = environment->snapshot();
         maskInstance = desktop.compositorInstance; maskConfigGeneration = desktop.configGeneration;
+        if (desktop.compositorInstance != instance) fail("Compositor changed while capture exclusions were being applied");
         if (desktop.reason == "exclusions_unverified") fail("Compositor did not load the expected capture exclusions");
+        return true;
+    }
+    void reconcileExclusions(qint64 time) {
+        if (!exclusionsPending || synthetic || time < nextExclusionAttempt) return;
+        const quint64 revision = exclusionRevision;
+        try {
+            desktop = environment->snapshot();
+            if (desktop.compositorInstance.isEmpty()) fail("Waiting for Hyprland before applying capture exclusions");
+            if (!applyExclusions()) return;
+            exclusionsPending = false; exclusionError.clear(); exclusionFailures = 0;
+            nextCapture = 0;
+        } catch (const std::exception &error) {
+            // A reload during the installer already queued a fresh attempt.
+            if (revision != exclusionRevision) return;
+            exclusionError = QString::fromUtf8(error.what()).left(500);
+            nextExclusionAttempt = monotonicMs() + std::min<qint64>(60000, qint64(5000) << std::min(exclusionFailures, 4));
+            exclusionFailures = std::min(exclusionFailures + 1, 4);
+        }
     }
     QJsonObject control(const QJsonObject &request) {
         const QString action = request.value("action").toString();
         if (action == "status") return status();
+        // The shell indicator needs only the existing state. Do not enumerate
+        // windows, inspect history or refresh worker diagnostics for each poll.
+        if (action == "bar-status") return {{"running", true}, {"pid", qint64(getpid())},
+            {"intent", intent}, {"state", state}, {"reason", reason},
+            {"config_error", configError}, {"exclusions_error", exclusionError}};
         if (action == "debug-status") return debugStatus();
         if (action == "debug-stop") { stopDebug(); return debugStatus(); }
         if (action == "debug-start") {
@@ -565,6 +609,11 @@ public:
             }
             nextConfig = time + 2000;
         }
+        // Changing an exclusion also affects ordinary screenshots. Reconcile
+        // even while stopped/paused or the history disk is disconnected, then
+        // do no further background mask work until another change or retry.
+        reconcileExclusions(time);
+        if (shuttingDown || stopRequested()) return;
         if (time >= nextStorageCheck) {
             if (!historyReady) prepareHistory();
             else try { checkStorage(); } catch (const std::exception &error) { loseStorage(QString::fromUtf8(error.what())); }
@@ -583,10 +632,13 @@ public:
         else desktop = environment->snapshot();
         if (!synthetic && !desktop.compositorInstance.isEmpty() && (desktop.reason == "exclusions_unverified" ||
             (!maskToken.isEmpty() && (desktop.compositorInstance != maskInstance || desktop.configGeneration != maskConfigGeneration)))) {
-            try { applyExclusions(); }
-            catch (const std::exception &error) {
-                transition("exclusions_unverified", QString::fromUtf8(error.what()).left(500)); nextCapture = time + 5000; return;
-            }
+            if (!exclusionsPending) { exclusionsPending = true; nextExclusionAttempt = 0; }
+            reconcileExclusions(monotonicMs());
+        }
+        if (exclusionsPending) {
+            transition("exclusions_unverified", exclusionError.isEmpty() ? "Waiting for capture exclusions to be applied." : exclusionError);
+            nextCapture = std::max(monotonicMs() + 1000, nextExclusionAttempt);
+            return;
         }
         if (intent != "running" || shuttingDown || stopRequested()) return;
         if (!desktop.captureAllowed) { transition(desktop.reason, desktop.detail); nextCapture = time + 1000; return; }

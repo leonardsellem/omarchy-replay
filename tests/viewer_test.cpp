@@ -233,6 +233,7 @@ private slots:
         context.historyDirectory = "/mounted disk/replay-history";
         context.shownSettings.activeCpuPercent = 35;
         context.shownSettings.excludedApps = {"PRIVATE_APP_NOT_FOR_PROMPT"};
+        context.shownSettings.skippedApps = {"PRIVATE_SKIP_NOT_FOR_PROMPT"};
         context.shownSettings.excludedWindows = {{"PRIVATE_TITLE_NOT_FOR_PROMPT", "", "", "output", ""}};
         for (const auto topic : {replay::AgentPromptTopic::Setup, replay::AgentPromptTopic::Resources,
                                 replay::AgentPromptTopic::Exclusions}) {
@@ -244,6 +245,7 @@ private slots:
             QVERIFY(!prompt.contains("/README.md"));
             QVERIFY(!prompt.contains("./scripts/replay"));
             QVERIFY(!prompt.contains("PRIVATE_APP_NOT_FOR_PROMPT"));
+            QVERIFY(!prompt.contains("PRIVATE_SKIP_NOT_FOR_PROMPT"));
             QVERIFY(!prompt.contains("PRIVATE_TITLE_NOT_FOR_PROMPT"));
             QVERIFY(prompt.contains("using_last_valid_config"));
             QVERIFY(prompt.contains("If it was offline, leave it offline"));
@@ -275,6 +277,7 @@ private slots:
             QCOMPARE(config.requestCpuPercent, defaults.requestCpuPercent); QCOMPARE(config.pressureCpuPercent, defaults.pressureCpuPercent);
             QCOMPARE(config.cpuCeilingPercent, defaults.cpuCeilingPercent); QCOMPARE(config.idleSeconds, defaults.idleSeconds);
             QCOMPARE(config.loginStartup, defaults.loginStartup); QCOMPARE(config.excludedApps, defaults.excludedApps);
+            QCOMPARE(config.skippedApps, defaults.skippedApps);
             if (topic == replay::AgentPromptTopic::Resources) QVERIFY(prompt.contains("active CPU 35%"));
         }
     }
@@ -712,16 +715,21 @@ private slots:
         const auto gaming = replay::gamingAppExclusions();
         const auto media = replay::mediaAppExclusions();
         QVERIFY(!privacy.isEmpty()); QVERIFY(!gaming.isEmpty()); QVERIFY(!media.isEmpty());
-        for (const auto& app : gaming)
-            QCOMPARE(document.config.excludedApps.contains(app), app == "steam" || app == "Steam");
-        for (const auto& app : media) QVERIFY(!document.config.excludedApps.contains(app));
+        QCOMPARE(document.config.skippedApps, QStringList({"steam", "Steam"}));
+        for (const auto& app : gaming) QVERIFY(!document.config.excludedApps.contains(app));
+        for (const auto& app : media) {
+            QVERIFY(!document.config.excludedApps.contains(app)); QVERIFY(!document.config.skippedApps.contains(app));
+        }
         document.config.output = "SYNTHETIC-1";
         document.config.outputIdentity = "synthetic-display-identity";
         document.config.intervalSeconds = 4.5;
         document.config.retentionDays = 45;
         document.config.activeCpuPercent = 25;
         document.config.preferredAgent = "synthetic-agent";
-        document.config.excludedApps = {"omarchy-replay", "org.omarchy.screensaver", "org.example.Custom", privacy.first()};
+        // Existing strict protection remains authoritative, even when an
+        // optional preset later adds the same identity to the skip list.
+        document.config.excludedApps = {"omarchy-replay", "org.omarchy.screensaver", "org.example.Custom", privacy.first(), "steam"};
+        document.config.skippedApps = {"org.example.SkipCustom"};
         document.config.excludedWindows = {{"Private note", "org.example.Editor", {}, "output", {}}};
         replay::saveReplayConfig(document.config, document.original);
         {
@@ -730,6 +738,7 @@ private slots:
         }
         const auto before = replay::loadReplayConfig();
         FakeRecording service;
+        service.status["visible_windows"] = QJsonArray{QJsonObject{{"app_id", "org.example.Player"}, {"title", "Synthetic media"}}};
         auto viewer = replay::createViewer(replay::replayPaths().historyDirectory, service.hooks());
         viewer->show(); viewer->activateWindow();
         QTRY_VERIFY(!viewer->property("historyLoading").toBool());
@@ -744,42 +753,69 @@ private slots:
             QTRY_VERIFY(output->findData("SYNTHETIC-1") >= 0);
             dialog->findChild<QTabWidget*>("settingsTabs")->setCurrentIndex(2);
             auto* apps = dialog->findChild<QPlainTextEdit*>("settingExcludedApps"); QVERIFY(apps);
+            auto* skipped = dialog->findChild<QPlainTextEdit*>("settingSkippedApps"); QVERIFY(skipped);
             auto* preset = dialog->findChild<QComboBox*>("exclusionPreset"); QVERIFY(preset);
             auto* add = dialog->findChild<QPushButton*>("addExclusionPreset"); QVERIFY(add);
             QCOMPARE(preset->count(), 3);
-            QCOMPARE(apps->toPlainText(), QString("org.example.Custom\n") + privacy.first());
-            apps->setPlainText("  org.example.Custom  \n" + privacy.first() + "\norg.example.Custom\n");
-            QStringList expected{"org.example.Custom", privacy.first()};
+            QCOMPARE(apps->toPlainText(), QString("org.example.Custom\n") + privacy.first() + "\nsteam");
+            QCOMPARE(skipped->toPlainText(), QString("org.example.SkipCustom"));
+            const QString strictBeforePicker = apps->toPlainText();
+            QTimer::singleShot(0, [&] {
+                auto* picker = qobject_cast<QInputDialog*>(QApplication::activeModalWidget()); QVERIFY(picker);
+                picker->accept();
+            });
+            dialog->findChild<QPushButton*>("chooseExcludedApp")->click();
+            QCOMPARE(skipped->toPlainText(), QString("org.example.SkipCustom\norg.example.Player"));
+            QCOMPARE(apps->toPlainText(), strictBeforePicker);
+            apps->setPlainText("  org.example.Custom  \n" + privacy.first() + "\norg.example.Custom\nsteam\n");
+            skipped->setPlainText(" org.example.SkipCustom \norg.example.Player\norg.example.SkipCustom\n");
+            QStringList expectedStrict{"org.example.Custom", privacy.first(), "steam"};
+            QStringList expectedSkip{"org.example.SkipCustom", "org.example.Player"};
             for (const auto& entry : {qMakePair(QString("privacy"), privacy), qMakePair(QString("gaming"), gaming),
                                       qMakePair(QString("media"), media)}) {
                 preset->setCurrentIndex(preset->findData(entry.first));
-                const QString beforeClick = apps->toPlainText();
-                QTest::qWait(20); QCOMPARE(apps->toPlainText(), beforeClick);
-                preset->setFocus(); QTest::keyClick(preset, Qt::Key_Tab); QTRY_VERIFY(add->hasFocus());
+                const bool strictPreset = entry.first == "privacy";
+                auto* target = strictPreset ? apps : skipped;
+                auto* untouched = strictPreset ? skipped : apps;
+                const QString beforeClick = target->toPlainText(), otherList = untouched->toPlainText();
+                QTest::qWait(20); QCOMPARE(target->toPlainText(), beforeClick);
+                // Offscreen Qt can leave activation on the picker after its
+                // nested event loop exits. Establish real focus, then exercise
+                // the same editor → preset → action path a keyboard user takes.
+                dialog->activateWindow(); apps->setFocus(); QTRY_VERIFY(apps->hasFocus());
+                QTest::keyClick(apps, Qt::Key_Tab); QTRY_VERIFY(preset->hasFocus());
+                QTest::keyClick(preset, Qt::Key_Tab); QTRY_VERIFY(add->hasFocus());
                 QTest::keyClick(add, Qt::Key_Space);
+                auto& expected = strictPreset ? expectedStrict : expectedSkip;
                 for (const auto& app : entry.second) if (!expected.contains(app)) expected.append(app);
-                QCOMPARE(apps->toPlainText().split('\n'), expected);
+                QCOMPARE(target->toPlainText().split('\n'), expected);
+                QCOMPARE(untouched->toPlainText(), otherList);
                 QTest::keyClick(add, Qt::Key_Space);
-                QCOMPARE(apps->toPlainText().split('\n'), expected);
+                QCOMPARE(target->toPlainText().split('\n'), expected);
                 QCOMPARE(replay::loadReplayConfig().original, before.original);
             }
+            QVERIFY(apps->toPlainText().split('\n').contains("steam"));
+            QVERIFY(skipped->toPlainText().split('\n').contains("steam"));
             dialog->resize(600, 560); QTest::qWait(60);
             auto* scroll = dialog->findChild<QScrollArea*>("exclusionSettingsScroll"); QVERIFY(scroll);
-            scroll->ensureWidgetVisible(add);
             QCOMPARE(scroll->horizontalScrollBar()->maximum(), 0);
+            QVERIFY(QDir().mkpath("runs/exclusion-presets"));
+            scroll->verticalScrollBar()->setValue(0);
+            QVERIFY(dialog->grab().save("runs/exclusion-presets/compact-top.png"));
+            scroll->ensureWidgetVisible(add);
             for (auto* widget : {static_cast<QWidget*>(preset), static_cast<QWidget*>(add)})
                 QVERIFY(scroll->viewport()->rect().contains(QRect(widget->mapTo(scroll->viewport(), QPoint()), widget->size())));
-            QVERIFY(QDir().mkpath("runs/exclusion-presets"));
             QVERIFY(dialog->grab().save("runs/exclusion-presets/compact.png"));
 
-            // The two always-enforced exclusions also count toward the saved
-            // limit, even though this editor does not display them.
+            // Both lists and the two always-enforced identities share a
+            // single limit. Reject the entire addition before editing either.
             QStringList full;
-            for (int i = 0; i < 62; ++i) full.append(QString("org.example.Custom%1").arg(i));
+            for (int i = 0; i < 61; ++i) full.append(QString("org.example.Custom%1").arg(i));
             const QString fullText = full.join('\n');
-            apps->setPlainText(fullText);
+            apps->setPlainText(fullText); skipped->setPlainText("org.example.SkipCustom");
             preset->setCurrentIndex(preset->findData("media")); add->click();
             QCOMPARE(apps->toPlainText(), fullText);
+            QCOMPARE(skipped->toPlainText(), QString("org.example.SkipCustom"));
             auto* error = dialog->findChild<QLabel*>("settingsError"); QVERIFY(error);
             QVERIFY(error->isVisible()); QVERIFY(error->text().contains("64 app exclusions"));
             QCOMPARE(replay::loadReplayConfig().original, before.original);
@@ -811,13 +847,13 @@ private slots:
         QVERIFY(saved);
         QTRY_COMPARE(service.calls(), QStringList({"reload"}));
         auto after = replay::loadReplayConfig();
-        auto expected = before.config.excludedApps;
+        auto expected = before.config.skippedApps;
         for (const auto& app : gaming) if (!expected.contains(app)) expected.append(app);
-        QCOMPARE(after.config.excludedApps, expected);
+        QCOMPARE(after.config.skippedApps, expected);
+        QCOMPARE(after.config.excludedApps, before.config.excludedApps);
         QVERIFY(after.original.contains("[custom_user_option]")); QVERIFY(after.original.contains("unchanged"));
         // Compare every supported field after restoring the one intended edit.
-        // Separate temporary projections also cover preserved window rules.
-        after.config.excludedApps = before.config.excludedApps;
+        after.config.skippedApps = before.config.skippedApps;
         const QString beforePath = temporary.filePath("before.toml"), afterPath = temporary.filePath("after.toml");
         replay::saveReplayConfig(before.config, {}, beforePath);
         replay::saveReplayConfig(after.config, {}, afterPath);
@@ -1635,7 +1671,15 @@ private slots:
         QVERIFY(!initial.isEmpty()); QVERIFY(source.rect().contains(initial));
         QTest::keyClick(canvas, Qt::Key_Right);
         const QRect moved = canvas->property("textSelectionRect").toRect();
-        QVERIFY(moved.left() > initial.left()); QCOMPARE(moved.size(), initial.size());
+        QVERIFY(moved.left() > initial.left());
+        QCOMPARE(moved.top(), initial.top()); QCOMPARE(moved.height(), initial.height());
+        // The visible selection retains its size, but enclosing source pixels
+        // can differ by one column when the image is fitted at a fractional scale.
+        QVERIFY(std::abs(moved.width() - initial.width()) <= 1);
+        QTest::keyClick(canvas, Qt::Key_Left);
+        QCOMPARE(canvas->property("textSelectionRect").toRect(), initial);
+        QTest::keyClick(canvas, Qt::Key_Right);
+        QCOMPARE(canvas->property("textSelectionRect").toRect(), moved);
         QTest::keyClick(canvas, Qt::Key_Down, Qt::ShiftModifier);
         const QRect resized = canvas->property("textSelectionRect").toRect();
         QCOMPARE(resized.topLeft(), moved.topLeft()); QVERIFY(resized.height() > moved.height());
