@@ -174,7 +174,7 @@ To try fictional history before recording your screen:
 
 Use a fresh demo directory. Search for `Patrick` or `XYZ-1042`.
 
-Run the test suites after changing source:
+Build and run the test suites locally after changing source:
 
 ```bash
 ./scripts/replay build
@@ -198,7 +198,7 @@ omarchy plugin remove io.github.rblalock.omarchy-replay
 
 Uninstall removes Replay’s service, launcher, shortcut and compositor rules. It preserves configuration, history and custom storage, and saves stopped recording intent. Removing or disabling the shell plugin by itself leaves the native recorder installed; use **Stop recording** first if you want capture to stop. See [installation and removal](docs/installation.md).
 
-The GitHub workflow is configured to build and run synthetic tests on Arch; its first remote run is still pending. Native compositor and user-service checks also require an Omarchy test session; CI is not proof of a working marketplace installation.
+Validation runs locally; this repository has no GitHub Actions workflow. Native compositor and user-service checks require an Omarchy test session. The release plan keeps local test results separate from clean-machine installation proof and marketplace review.
 
 ## License
 

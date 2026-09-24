@@ -15,7 +15,7 @@ Listings are validated against an exact commit. The [security baseline](https://
 | Root manifest and working QML entry | `io.github.rblalock.omarchy-replay`, version 0.1.0, with a native bar widget and keyboard-driven quick actions. |
 | Installation/removal documentation | Standalone payload, transactional setup/update and history-preserving uninstall implemented; see [installation](installation.md). |
 | Dependencies | Source dependencies documented, including Qt's Wayland plugin. Minimum supported system versions need clean-machine proof. |
-| Automated checks | Pinned Arch build/test workflow added. Its commands passed a clean-container build and the enabled suites across the full run and a focused recheck; the first GitHub-hosted run remains pending. |
+| Local validation | Native, Python and plugin checks run locally. Earlier Arch container results are retained below. No GitHub Actions workflow is used. |
 | Preview | Optional; use fictional history, never personal captures. |
 | Submission | Not filed. Complete local release work before preparing the final commit and owner-reviewed issue. |
 
@@ -71,13 +71,15 @@ The source build uses Qt, Wayland capture protocols, Tesseract, SQLite, WebP, Py
 
 Run the actual install/open/configure/record/search/update/remove sequence in a separate Omarchy VM or test machine. Use fictional screen content for shareable evidence. Cover display selection, OCR highlights and region copy, lock/unlock, screensaver, suspend/resume, display disconnect and recovery. Exercise both strict privacy masks and Replay-only skips; verify incoming meeting content without weakening local privacy rules.
 
-Measure retained coverage, pending age, CPU, memory, storage growth and foreground responsiveness together. A passing headless CI run does not establish capture safety or long-session performance on another machine.
+Measure retained coverage, pending age, CPU, memory, storage growth and foreground responsiveness together. Passing headless tests does not establish capture safety or long-session performance on another machine.
 
 ## 5. Prepare the publication snapshot
 
 Review the final tree and every commit that will become reachable publicly. Exclude personal images, OCR databases, logs, credentials, private paths and diagnostic artifacts. Review author metadata, dependency notices and any preview. Keep local backups private; do not push backup refs.
 
-After packaging and installation tests pass, record one release version and exact source commit. Run CI and the marketplace compatibility/static checks against that same commit. The root README must clearly distinguish current features from planned agent recall and remote storage.
+After packaging and installation tests pass, record one release version and exact source commit. Run the local validation and marketplace compatibility/static checks against that same commit. The root README must clearly distinguish current features from planned agent recall and remote storage.
+
+The owner chose local validation to avoid GitHub Actions costs. This repository has no Actions workflow; hosted CI is not a release gate. The marketplace's own submission validation and maintainer review remain separate requirements.
 
 Prepare the marketplace issue with the prescribed headings, category, tags and checklist. Include the manual setup requirement, native dependencies, background service, compositor changes, local-data behavior and uninstall path in maintainer notes. Review the complete issue with the owner before submission. Making the repository public, publishing the release and submitting the issue have not been performed by this readiness task.
 
@@ -88,7 +90,7 @@ Prepare the marketplace issue with the prescribed headings, category, tags and c
 - Verified the plugin manager's lack of native lifecycle hooks against installed command source and the current marketplace contract.
 - Before the packaging changes, all 34 local CTest suites passed in 212.38 seconds with `REPLAY_TEST_RESOURCE_SCOPE=1`, including both opt-in native user-service suites. Fixtures used synthetic history; this is not clean-machine installation or live suspend/resume proof. Diagnostics remain local under ignored `runs/`.
 - The local test environment used Omarchy 4.0.4, Hyprland 0.56.2, Qt 6.11.2, Tesseract 5.5.3, Python 3.14.7 and wayland-protocols 1.49. These are tested versions, not established minimum requirements.
-- The exact CI container image and dependency list built successfully with no host mounts. The first full container run passed 31 suites, skipped the two native user-service suites and exposed an overly strict viewer-test assertion: translating a fitted selection can change its outward-rounded source crop by one pixel. The test now permits that rounding and requires exact reverse/forward round trips; OCR crop behavior is unchanged. The focused viewer suite then passed on the host (18.58 seconds) and a fresh pinned container (19.89 seconds), resolving all 32 container-enabled suites. Both temporary containers were removed. This validates the build/test commands locally, not GitHub execution or an installed Omarchy plugin.
+- A pinned Arch container image and the documented dependency list built successfully with no host mounts. The first full container run passed 31 suites, skipped the two native user-service suites and exposed an overly strict viewer-test assertion: translating a fitted selection can change its outward-rounded source crop by one pixel. The test now permits that rounding and requires exact reverse/forward round trips; OCR crop behavior is unchanged. The focused viewer suite then passed on the host (18.58 seconds) and a fresh pinned container (19.89 seconds), resolving all 32 container-enabled suites. Both temporary containers were removed. This validates the build/test commands locally, not an installed Omarchy plugin.
 
 Next work: clean-machine proof, then final publication review. These steps precede the planned agent recall interface. The current implementation and user commands are documented in [installation](installation.md).
 

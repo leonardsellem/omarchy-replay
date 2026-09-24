@@ -10,6 +10,7 @@ Treat Omarchy Replay as an installed Omarchy plugin in user-facing flows. Instru
 
 ## Development and verification
 
+- Run builds and tests locally. Do not add GitHub Actions workflows or enable hosted CI; the project owner has explicitly declined GitHub CI.
 - Build with `./scripts/replay build`; run `ctest --test-dir build --output-on-failure`.
 - `REPLAY_TEST_RESOURCE_SCOPE=1` opts into native temporary user-service tests. Tests must own and clean up their processes and units.
 - Use synthetic screens/history for automated capture tests. Do not start a personal recording, inspect private captured content, enable login capture or change desktop configuration without task authorization.

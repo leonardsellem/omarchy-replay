@@ -4,7 +4,7 @@ Updated 2026-09-24. This records implemented behavior, remaining validation and 
 
 ## Current priority: release readiness
 
-The user selected MIT and requested preparation for the Omarchy marketplace. The root license and third-party notices are present, and an Arch build/test workflow has been added. The [release plan](release-readiness.md) records the remaining requirements and verified gaps.
+The user selected MIT and requested preparation for the Omarchy marketplace. The root license and third-party notices are present. Validation runs locally, with no GitHub Actions workflow or hosted CI release gate. The [release plan](release-readiness.md) records the remaining requirements and verified gaps.
 
 Release items 1–3 are implemented: a standalone versioned native runtime with a file manifest, transactional installation/update and history-preserving uninstall, plus a real Omarchy bar widget. Its history icon opens quick actions for the viewer, Settings and recording. Setup is explicit and fresh installation leaves recording off. Omarchy’s plugin manager has no native lifecycle hooks, so updating or removing the native app remains a documented step. See [installation](installation.md).
 
