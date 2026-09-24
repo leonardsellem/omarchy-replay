@@ -49,6 +49,8 @@ private slots:
         QVERIFY(!document.exists); QVERIFY(document.original.isEmpty());
         QCOMPARE(document.config.retentionDays, 30); QCOMPARE(document.config.cpuCeilingPercent, 60.);
         QVERIFY(document.config.output.isEmpty()); QVERIFY(!document.config.loginStartup);
+        QVERIFY(!document.config.meetingsEnabled); QVERIFY(document.config.meetingsDirectory.isEmpty());
+        QCOMPARE(replay::replayMeetingsDirectory(document.config), QDir::homePath() + "/Documents/Meetings");
         QCOMPARE(document.config.excludedApps, replay::defaultAppExclusions());
         QCOMPARE(document.config.skippedApps, QStringList({"steam", "Steam"}));
         QCOMPARE(QDir(directory.path()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0);
@@ -208,6 +210,57 @@ preferred = 'synthetic-agent'
         }
     }
 
+    void optionalMeetingsRoundTripAndDetection() {
+        QTemporaryDir directory;
+        Environment environment;
+        environment.set("PATH", directory.path().toUtf8());
+        QVERIFY(!replay::meetingRecorderAvailable());
+        const QString path = directory.filePath("config.toml");
+        replay::ReplayConfig config;
+        config.meetingsDirectory = directory.filePath("meeting-sources");
+        replay::saveReplayConfig(config, {}, path);
+        write(path, contents(path).replace("[meetings]\n", "[meetings]\nfuture_option = 'keep me'\n"));
+        auto saved = replay::loadReplayConfig(path);
+        QCOMPARE(saved.config.meetingsDirectory, config.meetingsDirectory);
+        QCOMPARE(replay::replayMeetingsDirectory(saved.config), config.meetingsDirectory);
+        config.meetingsEnabled = true;
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, replay::saveReplayConfig(config, saved.original, path));
+        QCOMPARE(contents(path), saved.original);
+
+        const QString executable = directory.filePath("omarchy-meeting-recorder");
+        const QString marker = directory.filePath("must-not-run");
+        write(executable, "#!/bin/sh\ntouch '" + marker.toUtf8() + "'\n");
+        QVERIFY(QFile::setPermissions(executable, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QVERIFY(replay::meetingRecorderAvailable());
+        QVERIFY(!QFileInfo::exists(marker));
+        replay::saveReplayConfig(config, saved.original, path);
+        saved = replay::loadReplayConfig(path);
+        QVERIFY(saved.config.meetingsEnabled);
+        QVERIFY(saved.original.contains("future_option"));
+        QVERIFY(!QFileInfo::exists(marker));
+
+        // Removing the optional recorder must not invalidate unrelated settings
+        // or reset the user's saved integration choice.
+        QVERIFY(QFile::remove(executable));
+        QVERIFY(!replay::meetingRecorderAvailable());
+        QVERIFY(replay::loadReplayConfig(path).config.meetingsEnabled);
+        saved.config.intervalSeconds = 6;
+        replay::saveReplayConfig(saved.config, saved.original, path);
+        saved = replay::loadReplayConfig(path);
+        QVERIFY(saved.config.meetingsEnabled);
+        write(path, saved.original + "\n[future_integration]\nkeep = true\n");
+        saved = replay::loadReplayConfig(path);
+        saved.config.meetingsEnabled = false;
+        replay::saveReplayConfig(saved.config, saved.original, path);
+        QVERIFY(contents(path).contains("keep = true"));
+        saved = replay::loadReplayConfig(path);
+        for (const auto& invalid : QStringList{"relative/meetings", "/", "/tmp/meetings/", "/tmp/../meetings", "~/Meetings"}) {
+            auto changed = saved.config; changed.meetingsDirectory = invalid;
+            QVERIFY_THROWS_EXCEPTION(std::runtime_error, replay::saveReplayConfig(changed, saved.original, path));
+            QCOMPARE(contents(path), saved.original);
+        }
+    }
+
     void invalidCurrentConfigUsesSavedHistoryWithoutWriting() {
         QTemporaryDir directory;
         Environment environment;
@@ -248,6 +301,7 @@ preferred = 'synthetic-agent'
             "[recording]\ninterval_seconds = 0\n", "[storage]\nretention_days = -1\n",
             "[indexing]\nactive_cpu_percent = 'fast'\n", "[indexing]\nidle_cpu_percent = nan\n",
             "[service]\nlogin_startup = 1\n", "[storage]\ndirectory = 5\n", "[exclusions]\napps = [4]\n",
+            "[meetings]\nenabled = 1\n", "[meetings]\ndirectory = 5\n", "meetings = true\n",
             "[exclusions]\nskip_apps = [4]\n", "[exclusions]\nskip_apps = 'mpv'\n",
             "[exclusions]\nskip_apps = ['']\n", "[exclusions]\nskip_apps = [\"line\\nbreak\"]\n",
             "[[exclusions.windows]]\ntitle_regex = '['\n", "[[exclusions.windows]]\napp_id = 'private'\nscope = 'focused'\n",

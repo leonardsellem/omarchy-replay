@@ -58,6 +58,10 @@ idle_seconds = 60 # Integer 1–3600 before idle allowance applies.
 [service]
 login_startup = false # Start the coordinator at login with its saved capture intent.
 
+[meetings]
+enabled = false # Opt in to completed transcripts from installed Omarchy Meeting Recorder.
+directory = "" # Empty uses ~/Documents/Meetings; otherwise an absolute local folder.
+
 [exclusions]
 apps = [@DEFAULT_APP_EXCLUSIONS@] # Privacy: pause Replay and hide from screenshots/sharing.
 skip_apps = [@DEFAULT_SKIPPED_APPS@] # Pause Replay only. Combined limit: 64 app entries across both lists.
@@ -73,6 +77,8 @@ skip_apps = [@DEFAULT_SKIPPED_APPS@] # Pause Replay only. Combined limit: 64 app
 preferred = "" # Reserved setting; does not launch or configure an agent yet.
 ```
 CPU values are percentages of one core. Active/idle/request allowances pace OCR cooperatively; pressure takes precedence. The separate ceiling covers the whole OCR worker when systemd/cgroup enforcement is available, not capture or the viewer. Check reported enforcement; more cores alone do not justify a higher setting.
+
+Meetings are optional and never start audio recording or transcription. Enable only at the user's request and when `omarchy-meeting-recorder` is installed on PATH. Replay checks completed transcript/manifest pairs in the selected folder in a separate low-priority process, about once a minute, and respects indexing pause. Existing imports remain searchable if disabled; disabling stops new imports. Imported text follows Replay retention and deletion; source recordings are never changed. The meeting's known start time anchors it on the timeline, without guessing sentence-to-screen alignment. Missing or uncertain dates remain unanchored. The daemon status meetings object reports availability, enabled state, sync progress and errors. Do not inspect private transcripts while configuring this integration.
 
 Storage must be an existing empty folder or compatible Replay history owned by this user. Use an absolute path without a trailing slash; network filesystems and a folder that is itself a symlink are unsupported. Switching folders does not move or merge the previous archive. Missing/replaced storage blocks work instead of using the main disk. Retention applies to the selected archive, including pending OCR. The archive rolls oldest history out as new moments need room within its allowance and free-space reserve. Maximum age still expires older observations. Disk allowance, free-space reserve, capture interval and OCR backlog are separate controls. Apply only the storage changes the user requests: a smaller allowance, shorter age or larger reserve can permanently remove older history.
 

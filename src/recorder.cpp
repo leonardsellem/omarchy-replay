@@ -1,4 +1,5 @@
 #include "recorder.h"
+#include "meeting_index.h"
 #include "work_budget.h"
 
 #include <QCryptographicHash>
@@ -2173,7 +2174,7 @@ QJsonObject Indexer::statsJSON() const {
 
 namespace {
 HistoryMaintenanceResult removeHistoryObservations(const QString &requestedDirectory, qint64 from, qint64 until,
-                                                    int maxObservations, int maxFiles) {
+                                                    int maxObservations, int maxFiles, bool purgeMeetings = false, bool retention = false) {
     if (from < 0 || until < from || maxObservations < 1 || maxObservations > 10000 || maxFiles < 1 || maxFiles > 1024)
         error("Invalid bounded history maintenance range or batch size");
     const QString directory = privateHistoryDirectory(requestedDirectory);
@@ -2246,6 +2247,7 @@ HistoryMaintenanceResult removeHistoryObservations(const QString &requestedDirec
                 clip.bind(2, gap.start < from ? from : gap.end); clip.bind(3, gap.id); clip.next();
             }
         }
+        const auto meetingsRemoved = purgeMeetings ? deleteMeetingsInRange(db.handle, from, until, maxObservations, retention) : 0;
         db.exec("COMMIT");
         result.observationsRemoved = observations.size(); result.framesRemoved = framesRemoved; result.gapsRemoved = gapsRemoved;
         // Recover capture intents only while holding its idle lease. The active
@@ -2260,7 +2262,7 @@ HistoryMaintenanceResult removeHistoryObservations(const QString &requestedDirec
         Statement remaining(db, "SELECT EXISTS(SELECT 1 FROM observations WHERE timestamp_ms>=? AND timestamp_ms<?) OR "
             "EXISTS(SELECT 1 FROM history_gaps WHERE start_ms<? AND end_ms>?) OR EXISTS(SELECT 1 FROM history_media WHERE state='retired')");
         remaining.bind(1, from); remaining.bind(2, until); remaining.bind(3, until); remaining.bind(4, from);
-        remaining.next(); result.more = remaining.number(0) != 0;
+        remaining.next(); result.more = remaining.number(0) != 0 || meetingsRemoved >= maxObservations;
         if (!result.more) {
             Statement vacuum(db, "PRAGMA auto_vacuum"); vacuum.next();
             if (vacuum.number(0) == 2) {
@@ -2278,12 +2280,12 @@ HistoryMaintenanceResult removeHistoryObservations(const QString &requestedDirec
 } // namespace
 
 HistoryMaintenanceResult maintainHistory(const QString &directory, qint64 expireBeforeMs, int maxObservations, int maxFiles) {
-    return removeHistoryObservations(directory, 0, expireBeforeMs, maxObservations, maxFiles);
+    return removeHistoryObservations(directory, 0, expireBeforeMs, maxObservations, maxFiles, true, true);
 }
 
 HistoryMaintenanceResult deleteHistoryRange(const QString &directory, qint64 fromInclusiveMs, qint64 toExclusiveMs,
                                            int maxObservations, int maxFiles) {
-    return removeHistoryObservations(directory, fromInclusiveMs, toExclusiveMs, maxObservations, maxFiles);
+    return removeHistoryObservations(directory, fromInclusiveMs, toExclusiveMs, maxObservations, maxFiles, true, false);
 }
 
 HistorySpaceResult makeHistorySpace(const QString &requestedDirectory, quint64 maxDiskBytes,
@@ -2376,7 +2378,7 @@ HistorySpaceResult makeHistorySpace(const QString &requestedDirectory, quint64 m
         const quint64 needed = std::max(allowanceNeed, freeNeed);
         quint64 estimated = 0;
         int observations = 0;
-        qint64 lastTimestamp = 0;
+        qint64 lastTimestamp = 0, firstTimestamp = 0;
         QHash<qint64, qint64> counts;
         {
             Statement oldest(db, "SELECT o.timestamp_ms,o.frame_id,f.observation_count,m.bytes FROM observations o "
@@ -2385,6 +2387,7 @@ HistorySpaceResult makeHistorySpace(const QString &requestedDirectory, quint64 m
             oldest.bind(1, maxObservations);
             while (oldest.next()) {
                 ++observations; lastTimestamp = oldest.number(0);
+                if (observations == 1) firstTimestamp = lastTimestamp;
                 if (++counts[oldest.number(1)] == oldest.number(2)) {
                     estimated += quint64(oldest.number(3));
                     if (indexPressure) break; // Release one frame's text pages, then reassess.
@@ -2392,10 +2395,21 @@ HistorySpaceResult makeHistorySpace(const QString &requestedDirectory, quint64 m
                 if (estimated >= needed) break;
             }
         }
+        // Text-only meetings participate in oldest-first rolling storage.
+        // Reassess actual reclaimed pages after one transcript before deciding
+        // whether a newer screen observation also needs to be removed.
+        {
+            Statement exists(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_records'");
+            if (exists.next()) {
+                Statement meeting(db, "SELECT retention_ms FROM meeting_records ORDER BY retention_ms,id LIMIT 1");
+                if (meeting.next() && (observations == 0 || meeting.number(0) <= firstTimestamp)) observations = 0;
+            }
+        }
+        bool meetingEvicted = false;
         if (observations > 0) {
             const auto removed = removeHistoryObservations(directory, 0,
                 lastTimestamp == std::numeric_limits<qint64>::max() ? lastTimestamp : lastTimestamp + 1, observations,
-                maxFiles - int(result.maintenance.filesRemoved));
+                maxFiles - int(result.maintenance.filesRemoved), true, true);
             result.maintenance.observationsRemoved += removed.observationsRemoved;
             result.maintenance.framesRemoved += removed.framesRemoved;
             result.maintenance.filesRemoved += removed.filesRemoved;
@@ -2403,10 +2417,17 @@ HistorySpaceResult makeHistorySpace(const QString &requestedDirectory, quint64 m
             result.maintenance.bytesReclaimed += removed.bytesReclaimed;
             result.maintenance.busy = removed.busy;
             result.maintenance.more = removed.more;
+        } else {
+            // A history can contain imported transcripts without any retained
+            // screens. Its text index participates in the same rolling cap.
+            db.exec("BEGIN IMMEDIATE");
+            try { meetingEvicted = evictOldestMeeting(db.handle); db.exec("COMMIT"); }
+            catch (...) { sqlite3_exec(db.handle, "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+            if (meetingEvicted) db.exec("PRAGMA incremental_vacuum(32)");
         }
         result.maintenance.diskBytes = historyDiskBytes(db, directory);
         result.ready = fits(result.maintenance.diskBytes, available());
-        result.more = !result.ready && (result.maintenance.busy || result.maintenance.observationsRemoved > 0 ||
+        result.more = !result.ready && (meetingEvicted || result.maintenance.busy || result.maintenance.observationsRemoved > 0 ||
                                       result.maintenance.filesRemoved > 0 || result.maintenance.diskBytes < initialBytes);
         result.reason = result.ready ? QString() : result.more
             ? "Rolling out older moments to make room for new recording."

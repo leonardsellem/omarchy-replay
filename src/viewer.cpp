@@ -6,6 +6,8 @@
 #include "replay_config.h"
 #include "recording_service.h"
 #include "storage_forecast.h"
+#include "meeting_index.h"
+#include "meeting_view.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -59,6 +61,7 @@
 #include <QSet>
 #include <QShortcut>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
@@ -388,6 +391,12 @@ public:
         update();
     }
     std::function<void(qint64)> activateMatch;
+    std::function<void(qint64)> activateMeeting;
+    void setMeetings(const QVector<MeetingTimelinePoint>& meetings) {
+        meetings_ = meetings;
+        setProperty("meetingMarkerCount", meetings_.size());
+        update();
+    }
     void setMoment(qint64 moment) {
         if (moment_ && moment_ != moment && isVisible()) { marker_.stop(); marker_.start(); }
         moment_ = moment;
@@ -419,6 +428,16 @@ protected:
             p.drawEllipse(QPointF(x, y), 1.5, 1.5);
         }
         occupied.clear();
+        p.setPen(QPen(colors_.accent, 1.5));
+        p.setBrush(colors_.background);
+        for (const auto& meeting : meetings_) {
+            const int x = left + fraction(meeting.startedAtMs) * (right - left);
+            if (occupied.contains(x / 8)) continue;
+            occupied.insert(x / 8);
+            p.drawRect(QRectF(x - 3, 4, 6, 6));
+        }
+        occupied.clear();
+        p.setPen(Qt::NoPen);
         p.setBrush(colors_.accent);
         for (const auto& hit : hits_) {
             const int x = left + fraction(hit.timestampMs) * (right - left);
@@ -441,6 +460,15 @@ protected:
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton) return;
         setFocus();
+        if (event->position().y() <= 14 && activateMeeting) {
+            qint64 nearest = 0;
+            double distance = 10;
+            for (const auto& meeting : meetings_) {
+                const double delta = std::abs(12 + fraction(meeting.startedAtMs) * (width() - 24) - event->position().x());
+                if (delta < distance) { nearest = meeting.id; distance = delta; }
+            }
+            if (nearest) { activateMeeting(nearest); return; }
+        }
         if (std::abs(event->position().y() - 19) < 12 && activateMatch) {
             qint64 nearest = 0;
             double distance = 9;
@@ -467,6 +495,7 @@ private:
     ReplayColors colors_;
     TimelineOverview overview_;
     QVector<TimelinePoint> hits_;
+    QVector<MeetingTimelinePoint> meetings_;
     qint64 moment_ = 0;
     QVariantAnimation marker_;
     double markerRadius_ = 3;
@@ -479,16 +508,30 @@ struct DecodedFrame {
     QString error;
 };
 
+struct RecallResult {
+    FrameRecord frame;
+    MeetingSearchResult meeting;
+    bool isMeeting = false;
+    qint64 key() const { return isMeeting ? -meeting.meeting.id : frame.id; }
+};
+
 struct HistorySnapshot {
     quint64 generation = 0;
     quint64 selectionRevision = 0;
     QString query;
+    QString source;
     bool preserve = false;
     qint64 currentId = 0;
     QJsonObject indexing;
     QJsonObject service, policy;
     QJsonObject recording;
     QVector<FrameRecord> matches;
+    QVector<RecallResult> rows;
+    QVector<MeetingTimelinePoint> meetings;
+    qint64 meetingCount = 0;
+    qint64 totalResults = 0;
+    qint64 resultOffset = 0;
+    int selectedRow = -1;
     TimelineOverview timeline;
     SearchPage page;
     qint64 offset = 0;
@@ -497,6 +540,67 @@ struct HistorySnapshot {
     std::optional<FrameRecord> current;
     QString error;
 };
+
+// Meeting results are grouped first in All; screen matches retain their existing
+// chronological paging. Never load transcript bodies merely to render a page.
+void readRecallResults(const QString& directory, HistorySnapshot& result) {
+    const bool blank = result.query.trimmed().isEmpty();
+    result.meetingCount = listMeetings(directory, 1).totalMatches;
+    if (result.source != "screens") result.meetings = meetingTimeline(directory);
+    if (result.source == "screens") {
+        if (blank) result.matches = listFrames(directory, 200, 0);
+        else {
+            result.page = searchFramePage(directory, result.query, 100, result.offset,
+                SearchMode::PrefixLastToken, 1000, result.anchorFrameId);
+            result.matches = result.page.frames;
+        }
+        result.totalResults = result.page.totalMatches;
+        result.resultOffset = result.page.offset;
+        result.selectedRow = result.page.selectedRow;
+        for (const auto& frame : result.matches) result.rows.append({frame, {}, false});
+        return;
+    }
+    const auto meetings = [&](qint64 offset) {
+        return blank ? listMeetings(directory, 100, offset) : searchMeetings(directory, result.query, 100, offset);
+    };
+    auto meetingPage = meetings(result.offset);
+    const qint64 meetingTotal = meetingPage.totalMatches;
+    const bool screens = result.source == "all" && !blank;
+    qint64 offset = result.offset;
+    if (screens) {
+        result.page = searchFramePage(directory, result.query, 100, std::max<qint64>(0, offset - meetingTotal),
+            SearchMode::PrefixLastToken, 1000, result.anchorFrameId);
+        if (result.anchorFrameId && result.page.selectedRow >= 0) {
+            offset = meetingTotal + result.page.offset;
+            result.selectedRow = result.page.selectedRow;
+        }
+    }
+    result.totalResults = meetingTotal + (screens ? result.page.totalMatches : 0);
+    const qint64 validOffset = result.totalResults && offset >= result.totalResults
+        ? ((result.totalResults - 1) / 100) * 100 : offset;
+    if (validOffset != offset) {
+        offset = validOffset;
+        meetingPage = meetings(offset);
+        if (screens) result.page = searchFramePage(directory, result.query, 100, std::max<qint64>(0, offset - meetingTotal),
+            SearchMode::PrefixLastToken, 1000);
+    }
+    result.resultOffset = offset;
+    if (offset < meetingTotal) {
+        for (const auto& meeting : meetingPage.results) result.rows.append({{}, meeting, true});
+    }
+    if (screens) {
+        result.matches = result.page.frames;
+        for (const auto& frame : result.matches) {
+            if (result.rows.size() >= 100) break;
+            result.rows.append({frame, {}, false});
+        }
+    } else if (blank && result.source == "all") {
+        result.matches = listFrames(directory, 200, 0);
+        // Keep the ordinary empty-query screen list (including pending images)
+        // intact when no meeting rows are present.
+        if (!meetingTotal) for (const auto& frame : result.matches) result.rows.append({frame, {}, false});
+    }
+}
 
 struct TimelineNeighbors {
     qint64 id = 0;
@@ -866,6 +970,41 @@ public:
         exclusionLayout->addWidget(exclusionPrompt, 0, Qt::AlignLeft);
         connect(exclusionPrompt, &QPushButton::clicked, this, [this] { copyAgentPrompt(AgentPromptTopic::Exclusions); });
 
+        const bool recorderAvailable = meetingRecorderAvailable();
+        auto* meetings = makePage("&Meetings", "meetingSettingsScroll");
+        const int meetingTab = tabs->count() - 1;
+        section(meetings, "Omarchy Meeting Recorder");
+        meetings->addWidget(note("A separate Omarchy plugin records and transcribes meetings. Replay makes its completed transcripts searchable alongside your screen history."));
+        auto* meetingRepository = new QPushButton("Installation and documentation");
+        meetingRepository->setObjectName("openMeetingRecorderRepository");
+        meetingRepository->setToolTip("github.com/jankeesvw/omarchy-meeting-recorder");
+        meetings->addWidget(meetingRepository, 0, Qt::AlignLeft);
+        connect(meetingRepository, &QPushButton::clicked, this, [] {
+            QDesktopServices::openUrl(QUrl("https://github.com/jankeesvw/omarchy-meeting-recorder"));
+        });
+        meetingsEnabled_ = new QCheckBox("Include meeting transcripts");
+        meetingsEnabled_->setObjectName("settingMeetingsEnabled");
+        meetings->addWidget(meetingsEnabled_);
+        auto* meetingForm = makeForm(meetings);
+        meetingsDirectory_ = new QLineEdit;
+        meetingsDirectory_->setObjectName("settingMeetingsDirectory");
+        meetingForm->addRow("Meetings &folder", meetingsDirectory_);
+        auto* chooseMeetings = new QPushButton("Choose folder");
+        chooseMeetings->setObjectName("chooseMeetingsDirectory");
+        meetings->addWidget(chooseMeetings, 0, Qt::AlignLeft);
+        connect(chooseMeetings, &QPushButton::clicked, this, [this] {
+            const QString directory = QFileDialog::getExistingDirectory(this, "Meeting Recorder folder", meetingsDirectory_->text());
+            if (!directory.isEmpty()) meetingsDirectory_->setText(directory);
+        });
+        meetings->addWidget(note("Audio stays with Meeting Recorder. Replay keeps a searchable transcript and a marker at the meeting's known start."));
+        details(meetings, "meetingSettingsDetails",
+            "Existing completed meetings inside Replay's retention window are included. Transcript edits and folder renames are checked automatically. Turning this off stops new imports; saved transcripts remain until deleted or expired. Replay never deletes the recorder's originals.");
+        auto* meetingStatus = note(recorderAvailable ? "Meeting Recorder detected." : "Meeting Recorder is unavailable. New imports are paused.");
+        meetingStatus->setObjectName("meetingIntegrationStatus");
+        meetings->addWidget(meetingStatus);
+        const auto meetingState = recordingStatus.value("meetings").toObject();
+        if (!meetingState.value("error").toString().isEmpty()) meetings->addWidget(note(meetingState.value("error").toString()));
+
         error_ = new QLabel;
         error_->setObjectName("settingsError"); error_->setWordWrap(true); error_->setTextFormat(Qt::PlainText);
         error_->hide();
@@ -888,6 +1027,10 @@ public:
             document_ = resolved.document;
             configEditable_ = resolved.configError.isEmpty();
             const auto& config = document_.config;
+            meetingsEnabled_->setChecked(config.meetingsEnabled);
+            meetingsEnabled_->setEnabled(recorderAvailable || config.meetingsEnabled);
+            meetingsDirectory_->setText(replayMeetingsDirectory(config));
+            tabs->setTabVisible(meetingTab, recorderAvailable || config.meetingsEnabled);
             if (!config.output.isEmpty()) { output_->addItem(config.output + " · checking availability", config.output); output_->setCurrentIndex(1); }
             interval_->setValue(config.intervalSeconds);
             storageDirectory_ = config.storageDirectory; storage_->setText(replayHistoryDirectory(config));
@@ -1019,6 +1162,8 @@ private:
         shown.activeCpuPercent = budgets_[0]->value(); shown.idleCpuPercent = budgets_[1]->value();
         shown.requestCpuPercent = budgets_[2]->value(); shown.pressureCpuPercent = budgets_[3]->value();
         shown.cpuCeilingPercent = budgets_[4]->value(); shown.idleSeconds = idle_->value();
+        shown.meetingsEnabled = meetingsEnabled_->isChecked();
+        shown.meetingsDirectory = meetingsDirectory_->text().trimmed();
         shown.skippedApps = appEntries(skippedApps_);
         shown.excludedApps = appEntries(apps_);
         for (const QString& required : {"omarchy-replay", "org.omarchy.screensaver"})
@@ -1036,6 +1181,9 @@ private:
         config.output = output_->currentData().toString();
         if (config.output != document_.config.output || displayChosen_) config.outputIdentity.clear();
         config.storageDirectory = storageDirectory_;
+        config.meetingsEnabled = meetingsEnabled_->isChecked();
+        config.meetingsDirectory = meetingsDirectory_->text().trimmed();
+        if (config.meetingsDirectory == replayMeetingsDirectory(ReplayConfig{})) config.meetingsDirectory.clear();
         config.intervalSeconds = interval_->value(); config.retentionDays = days_->value();
         config.maxDiskMiB = disk_->value(); config.minFreeMiB = free_->value(); config.loginStartup = login_->isChecked();
         config.activeCpuPercent = budgets_[0]->value(); config.idleCpuPercent = budgets_[1]->value();
@@ -1068,7 +1216,7 @@ private:
             deletionChanges << QString("oldest history if needed to leave %1 MiB free").arg(config.minFreeMiB);
         if (!deletionChanges.isEmpty()) {
             QMessageBox confirmation(QMessageBox::NoIcon, "Keep less history?",
-                QString("Saving can permanently delete %1, including images, recognized text and queued work. This cannot be undone.")
+                QString("Saving can permanently delete %1, including images, recognized text, imported transcripts and queued work. This cannot be undone.")
                     .arg(deletionChanges.join("; ")),
                 QMessageBox::Save | QMessageBox::Cancel, this);
             confirmation.setObjectName("confirmShorterRetention");
@@ -1103,6 +1251,8 @@ private:
     QDoubleSpinBox* interval_ = nullptr;
     QSpinBox *days_ = nullptr, *disk_ = nullptr, *free_ = nullptr, *idle_ = nullptr;
     QCheckBox* login_ = nullptr;
+    QCheckBox* meetingsEnabled_ = nullptr;
+    QLineEdit* meetingsDirectory_ = nullptr;
     QVector<QDoubleSpinBox*> budgets_;
     QPlainTextEdit *apps_ = nullptr, *skippedApps_ = nullptr;
     QTableWidget* windows_ = nullptr;
@@ -1123,6 +1273,7 @@ QString elapsedDescription(qint64 milliseconds) {
 }
 
 struct SeekResult { quint64 revision = 0; std::optional<FrameRecord> frame; QString error; };
+struct MeetingReadResult { quint64 revision = 0; qint64 id = 0; std::optional<MeetingRecord> meeting; QString error; };
 struct HighlightResult { qint64 id = 0; QString directory, query; TextMatches matches; QString error; };
 
 struct SelectionRequest {
@@ -1165,6 +1316,15 @@ public:
         query_->setObjectName("recallSearch");
         query_->setAccessibleName("Search recorded text");
         query_->setPlaceholderText("Search what you saw");
+        sourceFilter_ = new QComboBox;
+        sourceFilter_->setObjectName("recallSourceFilter");
+        sourceFilter_->setAccessibleName("Search source");
+        sourceFilter_->addItem("All", "all");
+        sourceFilter_->addItem("Screen text", "screens");
+        sourceFilter_->addItem("Meetings", "meetings");
+        sourceFilter_->setToolTip("Filter search · Alt+S");
+        sourceFilter_->hide();
+        header->addWidget(sourceFilter_);
         auto* clearSearch = new QPushButton("Clear");
         clearSearch->setObjectName("clearSearch");
         clearSearch->setAccessibleName("Clear search");
@@ -1335,7 +1495,8 @@ public:
             {"/  Ctrl+F", "Search"}, {"↑ ↓  J K", "Browse matches"}, {"← →  H L", "Explore time"},
             {"Home  End", "First / latest moment"}, {"PgUp  PgDn", "Previous / next match page"}, {"F  /  1", "Fit / original size"},
             {"Shift+arrows", "Pan original image"}, {"Ctrl+C", "Copy matching lines (or all text without a search)"},
-            {"Ctrl+Shift+C", "Copy all recognized screen text"}, {"M", "Toggle highlights"},
+            {"Ctrl+Shift+C", "Copy all screen text / full transcript"}, {"M", "Toggle screen highlights"},
+            {"Alt+S", "Screen text / meetings filter"}, {"[  ]  Alt+↑ ↓", "Meeting passages"},
             {"Drag  /  S", "Select text to copy"}, {"Arrows / Shift+arrows", "Move / resize selection; Enter copies"},
             {"P  /  C", "Index moment / catch up"}, {"I  /  ?", "Controls / shortcuts"}, {"Esc", "Leave control / dismiss panel, then close"}};
         const int helpRows = (shortcuts.size() + 1) / 2;
@@ -1375,7 +1536,12 @@ public:
         mediaStatus_->setTextFormat(Qt::PlainText);
         layout->addWidget(mediaStatus_);
         evidence_ = new EvidenceView(colors.accent);
-        layout->addWidget(evidence_, 1);
+        content_ = new QStackedWidget;
+        content_->addWidget(evidence_);
+        meetingView_ = new MeetingView;
+        meetingView_->browseScreens = [this](qint64 start) { browseMeetingScreens(start); };
+        content_->addWidget(meetingView_);
+        layout->addWidget(content_, 1);
         auto* caption = new QHBoxLayout;
         recorded_ = new QLabel("Loading history…");
         recorded_->setObjectName("recordedTimestamp");
@@ -1433,6 +1599,7 @@ public:
         matchReadout_->hide();
         timeline_ = new TimelineView(colors);
         timeline_->activateMatch = [this](qint64 id) { cancelSelectionOcr(); search(false, -1, -1, id); };
+        timeline_->activateMeeting = [this](qint64 id) { openMeeting(id); };
         layout->addWidget(timeline_);
         layout->addWidget(results_);
         auto* controls = new QHBoxLayout;
@@ -1447,11 +1614,18 @@ public:
         auto* keys = new QLabel("/ search   ← → time   ↑ ↓ matches   S select text   ? help");
         keys->setObjectName("keyboardHelp");
         controls->addWidget(keys);
+        connect(content_, &QStackedWidget::currentChanged, this, [this, fit, actual, keys] {
+            const bool meeting = content_->currentWidget() == meetingView_;
+            for (auto* button : {previous_, next_, fit, actual}) button->setVisible(!meeting);
+            keys->setText(meeting ? "/ search   ↑ ↓ matches   [ ] passages   ? help"
+                : "/ search   ← → time   ↑ ↓ matches   S select text   ? help");
+        });
         layout->addLayout(controls);
         searchTimer_.setSingleShot(true);
         searchTimer_.setInterval(180);
         connect(&searchTimer_, &QTimer::timeout, this, [this] { search(); });
         connect(query_, &QLineEdit::textChanged, this, [this] { cancelSelectionOcr(); cancelSeek(); searchTimer_.start(); });
+        connect(sourceFilter_, &QComboBox::currentIndexChanged, this, [this] { search(false, 0, 0); });
         connect(query_, &QLineEdit::returnPressed, this, [this] {
             search();
             if (query_->text().trimmed().isEmpty()) timeline_->setFocus(); else results_->setFocus();
@@ -1478,6 +1652,8 @@ public:
         connect(actual, &QPushButton::clicked, this, [this] { evidence_->setFit(false); });
         auto* focusSearch = new QShortcut(QKeySequence::Find, this);
         connect(focusSearch, &QShortcut::activated, this, [this] { query_->setFocus(); query_->selectAll(); });
+        auto* focusSource = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_S), this);
+        connect(focusSource, &QShortcut::activated, this, [this] { if (sourceFilter_->isVisible()) sourceFilter_->setFocus(); });
         auto* close = new QShortcut(QKeySequence(Qt::Key_Escape), this);
         close->setAutoRepeat(false);
         connect(close, &QShortcut::activated, this, [this] { escape(); });
@@ -1491,6 +1667,26 @@ public:
         seekTimer_.setSingleShot(true);
         seekTimer_.setInterval(35);
         connect(timeline_, &QSlider::valueChanged, this, [this](int value) { seekTime(timeline_->timeAt(value)); });
+        connect(&meetingReader_, &QFutureWatcher<MeetingReadResult>::finished, this, [this] {
+            if (closing_->load()) return;
+            const auto result = meetingReader_.result();
+            if (result.revision != meetingRevision_ || result.id != selectedMeetingId_) { startMeetingRead(); return; }
+            setProperty("meetingLoading", false);
+            if (!result.meeting) {
+                meetingView_->clear();
+                mediaStatus_->setText(result.error.isEmpty() ? "This meeting is no longer in Replay history." : result.error);
+                mediaStatus_->show();
+                return;
+            }
+            selectedMeeting_ = *result.meeting;
+            meetingView_->setMeeting(selectedMeeting_, completedQuery_);
+            mediaStatus_->hide();
+            if (selectedMeeting_.timeKnown) timeline_->setMoment(selectedMeeting_.startedAtMs);
+            recorded_->setText(selectedMeeting_.timeKnown
+                ? QDateTime::fromMSecsSinceEpoch(selectedMeeting_.startedAtMs).toString("ddd, MMM d · HH:mm:ss") + " · Meeting start"
+                : "Meeting · recording time unknown");
+            updateMatchReadout();
+        });
         connect(&seekTimer_, &QTimer::timeout, this, [this] { startSeek(); });
         connect(&seeker_, &QFutureWatcher<SeekResult>::finished, this, [this] {
             if (closing_->load()) return;
@@ -1631,8 +1827,17 @@ protected:
     bool eventFilter(QObject* object, QEvent* event) override {
         if (event->type() == QEvent::KeyPress) {
             auto* key = static_cast<QKeyEvent*>(event);
+            if (object == sourceFilter_) return QWidget::eventFilter(object, event);
+            if (selectedMeetingId_ && object != query_) {
+                if ((key->key() == Qt::Key_BracketLeft && key->modifiers() == Qt::NoModifier) || (key->key() == Qt::Key_Up && key->modifiers() == Qt::AltModifier)) {
+                    meetingView_->focusPassage(-1); return true;
+                }
+                if ((key->key() == Qt::Key_BracketRight && key->modifiers() == Qt::NoModifier) || (key->key() == Qt::Key_Down && key->modifiers() == Qt::AltModifier)) {
+                    meetingView_->focusPassage(1); return true;
+                }
+            }
             if (object == evidence_->canvas() && evidence_->canvas()->selectionKey(key)) return true;
-            if (object != query_ && key->modifiers() == Qt::ShiftModifier &&
+            if (!selectedMeetingId_ && object != query_ && key->modifiers() == Qt::ShiftModifier &&
                 (key->key() == Qt::Key_Left || key->key() == Qt::Key_Right || key->key() == Qt::Key_Up || key->key() == Qt::Key_Down)) {
                 auto* scroll = (key->key() == Qt::Key_Left || key->key() == Qt::Key_Right)
                     ? evidence_->horizontalScrollBar() : evidence_->verticalScrollBar();
@@ -1655,12 +1860,15 @@ protected:
                     case Qt::Key_Slash: query_->setFocus(); query_->selectAll(); return true;
                     case Qt::Key_Question: helpToggle_->toggle(); return true;
                     case Qt::Key_I: detailsToggle_->toggle(); return true;
-                    case Qt::Key_PageDown: changePage(1); return true;
-                    case Qt::Key_PageUp: changePage(-1); return true;
+                    case Qt::Key_PageDown:
+                    case Qt::Key_PageUp:
+                        if (selectedMeetingId_ && object->objectName() == "meetingTranscript") break;
+                        changePage(key->key() == Qt::Key_PageDown ? 1 : -1); return true;
                     case Qt::Key_F: evidence_->setFit(true); return true;
                     case Qt::Key_1: evidence_->setFit(false); return true;
                     case Qt::Key_M: evidence_->toggleHighlights(); return true;
                     case Qt::Key_S:
+                        if (selectedMeetingId_) return true;
                         evidence_->beginKeyboardSelection();
                         if (evidence_->canvas()->selectionActive()) {
                             copyNotice("Arrows move · Shift+arrows resize · Enter copies");
@@ -1671,8 +1879,8 @@ protected:
                     case Qt::Key_L: stepTime(1); return true;
                     case Qt::Key_Home: seekTime(overview_.firstTimestampMs); return true;
                     case Qt::Key_End: seekTime(overview_.lastTimestampMs); return true;
-                    case Qt::Key_J: case Qt::Key_Down: if (completedQuery_.trimmed().isEmpty()) stepTime(1); else stepMatch(1); return true;
-                    case Qt::Key_K: case Qt::Key_Up: if (completedQuery_.trimmed().isEmpty()) stepTime(-1); else stepMatch(-1); return true;
+                    case Qt::Key_J: case Qt::Key_Down: if (completedQuery_.trimmed().isEmpty() && !results_->isVisible() && !selectedMeetingId_) stepTime(1); else stepMatch(1); return true;
+                    case Qt::Key_K: case Qt::Key_Up: if (completedQuery_.trimmed().isEmpty() && !results_->isVisible() && !selectedMeetingId_) stepTime(-1); else stepMatch(-1); return true;
                     default: break;
                     }
                 }
@@ -1720,7 +1928,7 @@ private:
         cancelSelectionOcr();
         setProperty("historyDirectory", directory_);
         cancelSeek(); ++selectionRevision_;
-        selected_ = {}; matches_.clear(); requestedMoments_.clear();
+        selected_ = {}; matches_.clear(); resultRows_.clear(); closeMeeting(); requestedMoments_.clear();
         evidence_->setImage({}); evidence_->setHighlights({});
         setProperty("displayedFrameId", 0); setProperty("selectedFrameId", 0);
         setProperty("highlightCount", 0); highlighted_ = {};
@@ -1797,7 +2005,7 @@ private:
         if (interval.exec() != QDialog::Accepted) return;
         const int minutes = interval.intValue();
         QMessageBox confirmation(QMessageBox::NoIcon, "Permanently delete recent history?",
-            QString("Delete all recorded images, recognized text and queued work from the last %1 minutes? This cannot be undone. Recording will keep its current start or pause choice.").arg(minutes),
+            QString("Delete screen history and queued work from the last %1 minutes? Imported meetings that started in this interval are also removed; meetings without a known start use their import date. Original meeting files stay in their folder.\n\nThis cannot be undone. Recording keeps its current start or pause choice.").arg(minutes),
             QMessageBox::Yes | QMessageBox::Cancel, this);
         confirmation.setObjectName("confirmDeleteRecent");
         theme(&confirmation);
@@ -1833,6 +2041,7 @@ private:
     }
 
     void copyText(bool wholeScreen) {
+        if (selectedMeetingId_) { meetingView_->copyText(wholeScreen); return; }
         cancelSelectionOcr();
         if (!selected_.id || property("displayedFrameId").toLongLong() != selected_.id) {
             copyNotice("Wait for the recorded image to load.");
@@ -1925,6 +2134,7 @@ private:
         decoder_.waitForFinished();
         seeker_.waitForFinished();
         highlightReader_.waitForFinished();
+        meetingReader_.waitForFinished();
         setProperty("indexingRequestInFlight", false);
         setProperty("serviceRequestInFlight", false);
         setProperty("historyLoading", false);
@@ -1946,7 +2156,7 @@ private:
 
     void search(bool preserve = false, int targetRow = -1, qint64 requestedOffset = -1, qint64 anchorFrameId = 0) {
         if (closing_->load()) return;
-        const bool newQuery = query_->text() != completedQuery_;
+        const bool newQuery = query_->text() != completedQuery_ || sourceFilter_->currentData().toString() != completedSource_;
         if (newQuery) { requestedOffset = 0; targetRow = -1; anchorFrameId = 0; }
         else if (property("historyLoading").toBool() && requestedOffset < 0 && !anchorFrameId) {
             // A repeated search or refresh must keep the in-flight destination;
@@ -1961,10 +2171,12 @@ private:
         searchTimer_.stop();
         if (!preserve) { dwellTimer_.stop(); cancelSeek(); }
         completedQuery_ = query_->text();
+        completedSource_ = sourceFilter_->currentData().toString();
         requestedHistory_ = {};
         requestedHistory_.generation = ++historyGeneration_;
         requestedHistory_.selectionRevision = selectionRevision_;
         requestedHistory_.query = completedQuery_;
+        requestedHistory_.source = completedSource_;
         requestedHistory_.offset = requestedOffset >= 0 ? requestedOffset : pageOffset_;
         requestedHistory_.anchorFrameId = anchorFrameId;
         requestedHistory_.targetRow = targetRow;
@@ -2017,13 +2229,9 @@ private:
                 }
                 if (closing->load()) return result;
                 result.timeline = timelineOverview(directory);
-                if (result.query.trimmed().isEmpty()) result.matches = listFrames(directory, 200, 0);
-                else {
-                    result.page = searchFramePage(directory, result.query, 100, result.offset, SearchMode::PrefixLastToken, 1000, result.anchorFrameId);
-                    result.matches = result.page.frames;
-                }
+                readRecallResults(directory, result);
                 if (!closing->load() && result.currentId) result.current = frameById(directory, result.currentId);
-                if (!closing->load() && !result.current && result.query.trimmed().isEmpty() && result.timeline.totalFrames)
+                if (!closing->load() && !result.current && result.source != "meetings" && result.query.trimmed().isEmpty() && result.timeline.totalFrames)
                     result.current = frameNearTimestamp(directory, result.timeline.lastTimestampMs);
             } catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
             return result;
@@ -2036,7 +2244,7 @@ private:
             if (followConfiguredHistory(recording_)) return;
             updateRecordingActions();
         }
-        if (query_->text() != snapshot.query) { search(); return; }
+        if (query_->text() != snapshot.query || sourceFilter_->currentData().toString() != snapshot.source) { search(); return; }
         const bool preserve = snapshot.preserve;
         const bool navigated = snapshot.selectionRevision != selectionRevision_;
         const qint64 resultId = results_->currentItem() ? results_->currentItem()->data(Qt::UserRole).toLongLong() : 0;
@@ -2054,43 +2262,74 @@ private:
             service_ = snapshot.service;
             servicePolicy_ = snapshot.policy;
             matches_ = snapshot.matches;
+            resultRows_ = snapshot.rows;
             overview_ = snapshot.timeline;
+            for (const auto& meeting : snapshot.meetings) {
+                if (!overview_.totalFrames) overview_.firstTimestampMs = overview_.lastTimestampMs = meeting.startedAtMs;
+                else {
+                    overview_.firstTimestampMs = std::min(overview_.firstTimestampMs, meeting.startedAtMs);
+                    overview_.lastTimestampMs = std::max(overview_.lastTimestampMs, meeting.startedAtMs);
+                }
+                ++overview_.totalFrames;
+            }
             timeline_->setOverview(overview_);
-            totalMatches_ = snapshot.page.totalMatches;
-            pageOffset_ = snapshot.page.offset;
+            timeline_->setMeetings(snapshot.meetings);
+            totalMatches_ = snapshot.totalResults;
+            pageOffset_ = snapshot.resultOffset;
             timeline_->setMatches(snapshot.page.timeline);
+            sourceFilter_->setVisible(snapshot.meetingCount > 0 || snapshot.source != "all" || recording_.value("meetings").toObject().value("enabled").toBool());
+            query_->setPlaceholderText(sourceFilter_->isVisible() ? "Search your history" : "Search what you saw");
+            setProperty("meetingCount", snapshot.meetingCount);
             setProperty("totalMatches", totalMatches_);
             setProperty("matchPageOffset", pageOffset_);
             const QSignalBlocker blockResults(results_);
             results_->clear();
-            int selectedRow = snapshot.page.selectedRow >= 0 ? snapshot.page.selectedRow : std::max(0, snapshot.targetRow);
-            for (const FrameRecord& frame : matches_) {
-                auto* item = new QListWidgetItem(QDateTime::fromMSecsSinceEpoch(frame.timestampMs).toString("HH:mm:ss"));
-                item->setData(Qt::UserRole, frame.id);
-                item->setToolTip(QDateTime::fromMSecsSinceEpoch(frame.timestampMs).toString("MMM d · HH:mm:ss"));
-                item->setSizeHint(QSize(108, 28));
-                if ((preserve || navigated) && frame.id == resultId) selectedRow = results_->count();
+            int selectedRow = snapshot.selectedRow >= 0 ? snapshot.selectedRow : std::max(0, snapshot.targetRow);
+            bool hasMeetingRows = false;
+            for (const auto& result : resultRows_) {
+                auto* item = new QListWidgetItem;
+                item->setData(Qt::UserRole, result.key());
+                if (result.isMeeting) {
+                    hasMeetingRows = true;
+                    const auto& meeting = result.meeting.meeting;
+                    const QString title = fontMetrics().elidedText(meeting.title, Qt::ElideRight, 255);
+                    const QString date = meeting.timeKnown ? QDateTime::fromMSecsSinceEpoch(meeting.startedAtMs).toString("MMM d · HH:mm") : "Time unknown";
+                    item->setText(title + "\n" + date + (completedQuery_.trimmed().isEmpty() ? " · Meeting"
+                        : result.meeting.matchingPassages ? QString(" · %1 matches").arg(result.meeting.matchingPassages) : " · Title match"));
+                    item->setToolTip(meeting.title + " · " + date);
+                    item->setSizeHint(QSize(285, 48));
+                } else {
+                    item->setText(QDateTime::fromMSecsSinceEpoch(result.frame.timestampMs).toString("HH:mm:ss"));
+                    item->setToolTip(QDateTime::fromMSecsSinceEpoch(result.frame.timestampMs).toString("MMM d · HH:mm:ss") + " · Screen text");
+                    item->setSizeHint(QSize(108, 28));
+                }
+                if ((preserve || navigated) && result.key() == resultId) selectedRow = results_->count();
                 results_->addItem(item);
             }
-            const bool recent = completedQuery_.trimmed().isEmpty();
-            resultsHeading_->setText(QString("%1 matches").arg(totalMatches_));
-            results_->setVisible(!recent && !matches_.isEmpty());
-            resultsHeading_->setVisible(!recent);
-            matchReadout_->setVisible(!recent);
+            results_->setFixedHeight(hasMeetingRows ? 56 : 34);
+            const bool recent = completedQuery_.trimmed().isEmpty() && completedSource_ != "meetings";
+            results_->setVisible((!recent || hasMeetingRows) && !resultRows_.isEmpty());
+            resultsHeading_->setVisible(!recent || hasMeetingRows);
+            matchReadout_->setVisible(!recent || hasMeetingRows);
             ready_ = index.value("ready").toInteger();
             totalFrames_ = index.value("coverage_total_frames").toInteger();
             detailsToggle_->setText(sharedHistory_ ? "Controls" : pending_ > 0 ? QString("%1 pending").arg(pending_) : failed_ > 0
                 ? QString("%1 failed").arg(failed_) : "Index");
             detailsToggle_->setToolTip(sharedHistory_ ? "Recording, indexing and settings (I)" : indexingNotice().isEmpty() ? "Search indexing status (I)" : indexingNotice());
-            if (!matches_.isEmpty()) results_->setCurrentRow(std::min(selectedRow, int(matches_.size()) - 1));
+            if (!resultRows_.isEmpty()) results_->setCurrentRow(std::min(selectedRow, int(resultRows_.size()) - 1));
             if (preserve || navigated) results_->horizontalScrollBar()->setValue(scroll);
-            if (navigated && selected_.id) {
+            if ((preserve || navigated) && selectedMeetingId_) {
+                const auto found = std::find_if(resultRows_.cbegin(), resultRows_.cend(), [this](const auto& row) { return row.key() == -selectedMeetingId_; });
+                if (found != resultRows_.cend()) openMeeting(selectedMeetingId_, found->meeting.meeting.revision);
+                else openMeeting(selectedMeetingId_);
+            } else if (navigated && selected_.id) {
                 const auto found = std::find_if(matches_.begin(), matches_.end(), [this](const auto& row) { return row.id == selected_.id; });
                 if (found != matches_.end()) openFrame(*found);
                 else describeFrame();
             } else if (snapshot.current && snapshot.targetRow < 0) {
                 openFrame(*snapshot.current);
-            } else if (matches_.isEmpty()) {
+            } else if (resultRows_.isEmpty()) {
+                closeMeeting();
                 cancelSelectionOcr();
                 selected_ = {};
                 ++selectionRevision_;
@@ -2101,7 +2340,16 @@ private:
                 indexState_->clear();
                 recorded_->setText(recent ? sharedHistory_ ? "Your history starts here" : "No recorded history in this dataset" : "No matching recorded text");
                 mediaStatus_->show();
-                mediaStatus_->setText(pending_ > 0 ? "Saved images are not searchable yet. Clear the search to browse them while indexing is pending."
+                const auto meetingState = recording_.value("meetings").toObject();
+                const QString noMeetings = snapshot.meetingCount > 0
+                    ? "No meetings matched. Try a shorter word or clear the search."
+                    : !meetingState.value("error").toString().isEmpty() ? meetingState.value("error").toString()
+                    : meetingState.value("enabled").toBool()
+                        ? meetingState.value("paused").toBool() ? "Meeting imports are paused. Resume indexing in Controls to check for completed transcripts."
+                            : "No completed transcripts have been imported yet. Check the meetings folder in Settings."
+                        : "No meetings in this history. Enable meeting transcripts in Settings when Meeting Recorder is installed.";
+                mediaStatus_->setText(completedSource_ == "meetings" ? noMeetings
+                    : pending_ > 0 ? "Saved images are not searchable yet. Clear the search to browse them while indexing is pending."
                     : failed_ > 0 ? "Text indexing failed for saved images. Clear the search to browse the recorded images."
                     : recent ? sharedHistory_ ? "Open Controls with I to choose a display and start recording. Opening Replay does not record your screen."
                                              : "Run the controlled demo to create synthetic history."
@@ -2116,7 +2364,7 @@ private:
                 return;
             }
             results_->clear();
-            matches_.clear();
+            matches_.clear(); resultRows_.clear(); closeMeeting();
             cancelSelectionOcr();
             selected_ = {};
             ++selectionRevision_;
@@ -2140,7 +2388,79 @@ private:
     void openResult() {
         cancelSeek();
         const int row = results_->currentRow();
-        if (row >= 0 && row < matches_.size()) openFrame(matches_[row]);
+        if (row < 0 || row >= resultRows_.size()) return;
+        const auto& result = resultRows_[row];
+        if (result.isMeeting) openMeeting(result.meeting.meeting.id, result.meeting.meeting.revision);
+        else openFrame(result.frame);
+    }
+
+    void closeMeeting() {
+        if (!selectedMeetingId_) return;
+        selectedMeetingId_ = 0;
+        selectedMeeting_ = {};
+        ++meetingRevision_;
+        setProperty("selectedMeetingId", 0);
+        setProperty("meetingLoading", false);
+        content_->setCurrentWidget(evidence_);
+    }
+
+    void openMeeting(qint64 id, const QString& revision = {}) {
+        if (closing_->load() || id <= 0) return;
+        cancelSeek(); cancelSelectionOcr(); dwellTimer_.stop();
+        const bool unchanged = selectedMeetingId_ == id && !revision.isEmpty() && selectedMeeting_.revision == revision;
+        if (selectedMeetingId_ != id) {
+            selectedMeeting_ = {};
+            meetingView_->clear();
+            ++selectionRevision_;
+        }
+        selectedMeetingId_ = id;
+        const auto found = std::find_if(resultRows_.cbegin(), resultRows_.cend(), [id](const auto& row) { return row.key() == -id; });
+        {
+            const QSignalBlocker blocker(results_);
+            results_->setCurrentRow(found == resultRows_.cend() ? -1 : int(std::distance(resultRows_.cbegin(), found)));
+            if (results_->currentItem()) results_->scrollToItem(results_->currentItem());
+        }
+        selected_ = {};
+        setProperty("selectedFrameId", 0);
+        setProperty("displayedFrameId", 0);
+        setProperty("selectedMeetingId", id);
+        content_->setCurrentWidget(meetingView_);
+        indexState_->clear();
+        mediaStatus_->hide();
+        recorded_->setText("Meeting");
+        updateNavigation(); updateIndexingActions(); updateMatchReadout();
+        if (unchanged) {
+            // setMeeting preserves the text selection and scroll position when
+            // neither body nor query changed during a background refresh.
+            meetingView_->setMeeting(selectedMeeting_, completedQuery_);
+            recorded_->setText(selectedMeeting_.timeKnown
+                ? QDateTime::fromMSecsSinceEpoch(selectedMeeting_.startedAtMs).toString("ddd, MMM d · HH:mm:ss") + " · Meeting start"
+                : "Meeting · recording time unknown");
+            return;
+        }
+        ++meetingRevision_;
+        setProperty("meetingLoading", true);
+        if (!meetingReader_.isRunning()) startMeetingRead();
+    }
+
+    void startMeetingRead() {
+        if (closing_->load() || !selectedMeetingId_) return;
+        const auto directory = directory_;
+        const auto id = selectedMeetingId_;
+        const auto revision = meetingRevision_;
+        const auto closing = closing_;
+        meetingReader_.setFuture(QtConcurrent::run([directory, id, revision, closing] {
+            MeetingReadResult result; result.id = id; result.revision = revision;
+            try { if (!closing->load()) result.meeting = readMeeting(directory, id); }
+            catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
+            return result;
+        }));
+    }
+
+    void browseMeetingScreens(qint64 timestamp) {
+        if (timestamp <= 0) return;
+        seekTime(timestamp);
+        seekFromMeeting_ = true;
     }
 
     void describeFrame() {
@@ -2158,20 +2478,23 @@ private:
     }
 
     void openFrame(const FrameRecord& frame) {
+        closeMeeting();
         const bool changed = selected_.id != frame.id;
         const bool keepImage = selected_.id == frame.id && selected_.available == frame.available;
         if (!keepImage) cancelSelectionOcr();
         if (changed) { ++selectionRevision_; dwellTimer_.stop(); }
         selected_ = frame;
         setProperty("selectedFrameId", frame.id);
-        if (!completedQuery_.trimmed().isEmpty()) {
-            const auto found = std::find_if(matches_.cbegin(), matches_.cend(), [this](const auto& row) { return row.id == selected_.id; });
-            if (found != matches_.cend()) {
-                const int row = int(std::distance(matches_.cbegin(), found));
+        {
+            const auto found = std::find_if(resultRows_.cbegin(), resultRows_.cend(), [this](const auto& row) { return row.key() == selected_.id; });
+            // Keep a searched result as a return point while browsing nearby
+            // screens. An initial, unfiltered preview has no such selection.
+            if (found != resultRows_.cend() || completedQuery_.trimmed().isEmpty()) {
+                const int row = found == resultRows_.cend() ? -1 : int(std::distance(resultRows_.cbegin(), found));
                 if (results_->currentRow() != row) {
                     const QSignalBlocker blocker(results_);
                     results_->setCurrentRow(row);
-                    results_->scrollToItem(results_->currentItem());
+                    if (results_->currentItem()) results_->scrollToItem(results_->currentItem());
                 }
             }
         }
@@ -2406,6 +2729,7 @@ private:
     }
 
     void seekTime(qint64 timestamp) {
+        seekFromMeeting_ = false;
         cancelSelectionOcr();
         seekPending_ = true;
         seekTarget_ = timestamp;
@@ -2421,10 +2745,14 @@ private:
         const QString directory = directory_;
         const auto revision = seekRevision_;
         const auto target = seekTarget_;
+        const bool fromMeeting = seekFromMeeting_;
         const auto closing = closing_;
-        seeker_.setFuture(QtConcurrent::run([directory, revision, target, closing] {
+        seeker_.setFuture(QtConcurrent::run([directory, revision, target, closing, fromMeeting] {
             SeekResult result; result.revision = revision;
-            try { if (!closing->load()) result.frame = frameNearTimestamp(directory, target); }
+            try {
+                if (!closing->load()) result.frame = fromMeeting ? screenNearMeetingStart(directory, target) : frameNearTimestamp(directory, target);
+                if (fromMeeting && !result.frame) result.error = "No screen history is available near this meeting's start. You can still read its transcript.";
+            }
             catch (const std::exception& error) { result.error = QString::fromUtf8(error.what()); }
             return result;
         }));
@@ -2447,15 +2775,15 @@ private:
     }
 
     void updateMatchReadout() {
-        if (completedQuery_.trimmed().isEmpty()) return;
-        const auto found = std::find_if(matches_.cbegin(), matches_.cend(), [this](const auto& frame) { return frame.id == selected_.id; });
-        if (found != matches_.cend()) {
-            const auto ordinal = pageOffset_ + std::distance(matches_.cbegin(), found) + 1;
-            resultsHeading_->setText(QString("%1 / %2 matches").arg(ordinal).arg(totalMatches_));
-        } else {
-            resultsHeading_->setText(QString("%1 matches").arg(totalMatches_));
-        }
-        const qint64 ordinal = pageOffset_ + std::max(0, results_->currentRow());
+        const qint64 key = selectedMeetingId_ ? -selectedMeetingId_ : selected_.id;
+        const auto found = std::find_if(resultRows_.cbegin(), resultRows_.cend(), [key](const auto& row) { return row.key() == key; });
+        const bool meetingList = completedQuery_.trimmed().isEmpty();
+        const QString label = meetingList ? "meetings" : "matches";
+        if (found != resultRows_.cend()) {
+            const auto ordinal = pageOffset_ + std::distance(resultRows_.cbegin(), found) + 1;
+            resultsHeading_->setText(QString("%1 / %2 %3").arg(ordinal).arg(totalMatches_).arg(label));
+        } else resultsHeading_->setText(QString("%1 %2").arg(totalMatches_).arg(label));
+        const qint64 ordinal = pageOffset_ + results_->currentRow();
         previousMatch_->setEnabled(totalMatches_ > 0 && ordinal > 0);
         nextMatch_->setEnabled(totalMatches_ > 0 && ordinal + 1 < totalMatches_);
     }
@@ -2463,7 +2791,7 @@ private:
     void changePage(int direction) {
         cancelSelectionOcr();
         if (property("historyLoading").toBool() && !requestedHistory_.preserve) return;
-        if (completedQuery_.trimmed().isEmpty() || totalMatches_ <= 0) return;
+        if (totalMatches_ <= 0) return;
         const auto target = pageOffset_ + direction * 100;
         if (target < 0 || target >= totalMatches_) return;
         search(false, direction < 0 ? 99 : 0, target);
@@ -2472,11 +2800,11 @@ private:
     void stepMatch(int direction) {
         cancelSelectionOcr();
         if (property("historyLoading").toBool() && !requestedHistory_.preserve) return;
-        if (matches_.isEmpty()) return;
+        if (resultRows_.isEmpty()) return;
         const int target = results_->currentRow() + direction;
         if (target < 0 && pageOffset_ > 0) { changePage(-1); return; }
-        if (target >= matches_.size() && pageOffset_ + matches_.size() < totalMatches_) { changePage(1); return; }
-        results_->setCurrentRow(std::clamp(target, 0, int(matches_.size()) - 1));
+        if (target >= resultRows_.size() && pageOffset_ + resultRows_.size() < totalMatches_) { changePage(1); return; }
+        results_->setCurrentRow(std::clamp(target, 0, int(resultRows_.size()) - 1));
         results_->scrollToItem(results_->currentItem());
         openResult();
     }
@@ -2507,6 +2835,11 @@ private:
     qint64 seekTarget_ = 0;
     bool seekPending_ = false;
     QFutureWatcher<SeekResult> seeker_;
+    bool seekFromMeeting_ = false;
+    QFutureWatcher<MeetingReadResult> meetingReader_;
+    quint64 meetingRevision_ = 0;
+    qint64 selectedMeetingId_ = 0;
+    MeetingRecord selectedMeeting_;
     QFutureWatcher<HighlightResult> highlightReader_;
     HighlightResult highlighted_;
     QString directory_;
@@ -2527,6 +2860,7 @@ private:
     quint64 selectionOcrRevision_ = 0, clipboardRevision_ = 0;
     std::shared_ptr<std::atomic_bool> closing_ = std::make_shared<std::atomic_bool>(false);
     QString completedQuery_;
+    QString completedSource_ = "all";
     qint64 pending_ = 0, failed_ = 0, disabled_ = 0, priorityPending_ = 0, catchUpUntil_ = 0;
     quint64 historyGeneration_ = 0, selectionRevision_ = 0;
     bool legacy_ = false;
@@ -2538,6 +2872,7 @@ private:
     QSet<qint64> requestedMoments_;
     HistorySnapshot requestedHistory_;
     QLineEdit* query_ = nullptr;
+    QComboBox* sourceFilter_ = nullptr;
     QListWidget* results_ = nullptr;
     QLabel* resultsHeading_ = nullptr;
     QLabel* recorded_ = nullptr;
@@ -2550,6 +2885,8 @@ private:
     QLabel* workerDetails_ = nullptr;
     QLabel* pendingAge_ = nullptr;
     EvidenceView* evidence_ = nullptr;
+    QStackedWidget* content_ = nullptr;
+    MeetingView* meetingView_ = nullptr;
     QPushButton* previous_ = nullptr;
     QPushButton* next_ = nullptr;
     QPushButton* processMoment_ = nullptr;
@@ -2567,6 +2904,7 @@ private:
     QFutureWatcher<IndexingRequestResult> indexRequest_;
     QFutureWatcher<ServiceControlResult> serviceRequest_;
     QVector<FrameRecord> matches_;
+    QVector<RecallResult> resultRows_;
     std::optional<FrameRecord> previousFrame_;
     std::optional<FrameRecord> nextFrame_;
     FrameRecord selected_;

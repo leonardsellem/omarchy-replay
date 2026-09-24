@@ -16,7 +16,7 @@ If needed, inspect `systemctl --user show omarchy-replay.service -p ExecStart` t
 
 ## Settings
 
-Settings has three tabs. All controls support native keyboard navigation; Save applies changes and Cancel leaves the file unchanged.
+Settings groups recording, resources and exclusions, with an optional Meetings tab when Meeting Recorder is detected or the integration is already enabled. All controls support native keyboard navigation; Save applies changes and Cancel leaves the file unchanged.
 
 Each tab groups related fields and scrolls in smaller windows. **Details** expands the longer explanations. Use Tab to reach a control and Space to toggle it; Save and Cancel stay outside the scrolling area.
 
@@ -25,6 +25,7 @@ Each tab groups related fields and scrolls in smaller windows. **Details** expan
 | Recording | Display, capture interval, history folder, retention, disk limits and login startup. |
 | Resources | Active, idle, requested and pressure CPU allowances, idle delay and worker ceiling. |
 | Exclusions | Apps and window rules that should stay out of future captures. |
+| Meetings (optional) | Enable completed-transcript imports and choose Meeting Recorder's source folder. |
 
 The Display dropdown lists detected connectors with their model and resolution. A saved disconnected display remains visible as unavailable. Replay pins the selected hardware identity and waits if it disappears. Deliberately choosing a different display clears the old identity so Replay can verify the new selection.
 
@@ -37,7 +38,7 @@ The Display dropdown lists detected connectors with their model and resolution. 
 | Start recording / Resume recording | Permit new captures after desktop and storage checks pass. |
 | Pause recording | Save a manual pause across restarts; indexing can continue. |
 | Stop recording | Save stopped capture intent; history, indexing and maintenance remain available. |
-| Pause indexing / Resume indexing | Control OCR independently; pending originals stay retained. |
+| Pause indexing / Resume indexing | Control screen OCR and optional meeting imports; pending originals stay retained. |
 | Close the viewer | Leave recording and indexing choices unchanged. |
 | Delete recent… | Review and confirm permanent deletion of an interval. |
 
@@ -46,6 +47,14 @@ The **I** panel separates Recording and Search index. It shows capture state, st
 Capture waits while locked, asleep, inactive, disconnected from the selected display, blocked by an exclusion or unable to verify its environment. It resumes after a temporary block only when saved intent is running. Wake and unlock never override a manual pause or stop.
 
 **Start Replay at login** starts the installed coordinator with saved intent. It does not turn a stopped or paused recorder into a running one.
+
+## Optional meeting transcripts
+
+If [Omarchy Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) is installed, **Settings → Meetings** offers **Include meeting transcripts**, off by default. Its source folder defaults to `~/Documents/Meetings`. Enabling imports leaves screen-recording intent unchanged and never starts audio recording or transcription. The external recorder continues owning its audio and original files.
+
+Completed transcripts become searchable in Replay, grouped once per meeting. Use **All / Screen text / Meetings** to choose a source. Known meeting starts appear on the timeline; imported recordings and unknown dates remain searchable without a marker. Selecting a transcript passage does not claim that its words occurred at a specific screenshot. See the [meeting guide](meetings.md) for keyboard navigation, source updates and current limits.
+
+The coordinator must be running and indexing unpaused for new imports. A separate low-priority process checks stable source files, usually within about a minute. Disabling integration stops new imports and preserves existing copies. Removing the optional app also stops imports without invalidating other Replay settings.
 
 ## Storage
 
@@ -61,6 +70,8 @@ The retention window moves forward with time. Maintenance removes expired observ
 
 Replay keeps the newest history that fits the disk allowance and removes anything older than the retention age. When new moments need room, it deletes the oldest observations and their unneeded images, OCR text and queued work. The free-space reserve can require earlier cleanup. Recording continues after room is made; it waits only when cleanup is still working or safe reclamation cannot make enough space. An OCR backlog does not reject new captures.
 
+Imported meeting text shares these storage limits. Its age is the known meeting start, or first import time for an unknown date. **Delete recent…** removes a whole imported meeting when that anchor falls inside the requested interval; a meeting that started earlier is unaffected even if it continued into the interval. Replay never deletes the external recorder's audio or transcripts, and removed Replay copies do not return on the next scan.
+
 Settings reviews changes that shorten retention, reduce the disk allowance or increase the free-space reserve, because they can delete older history. Routine rollover needs no confirmation. Direct TOML edits apply without that dialog. **Delete recent…** has a separate confirmation. Neither operation promises forensic erasure from backups, filesystem snapshots or SSD media.
 
 ## Resources
@@ -68,6 +79,8 @@ Settings reviews changes that shorten retention, reduce the disk allowance or in
 The defaults allow OCR **40% of one CPU core** during activity, **50%** after 60 seconds idle or for requested work, and **10%** under sustained contention. A separate **60% whole-worker ceiling** is requested and verified when the host supports it. The panel distinguishes the requested value from actual enforcement.
 
 These values balance foreground work and indexing delay. Display resolution, changing pixels, text layout and CPU speed all affect throughput. Start with the defaults. If lag keeps growing or the desktop feels slower, use **Copy resources prompt** to have your agent inspect local status and make a measured adjustment. See [CPU scheduling](architecture.md#cpu-scheduling) for the policy and its limits.
+
+Those CPU settings apply to screen OCR. The optional meeting importer uses bounded batches and low priority in a separate process; it is outside OCR pacing and the OCR worker ceiling. It reads completed text only and has no speech model. The external recorder controls the resources used for transcription.
 
 The **I** panel and Recording Settings show current usage and the estimated history the whole allowance can hold. The summary uses calendar days when available, otherwise active recording hours. Expand the storage details for both estimates and the space needed for the chosen age window. Changing the size previews capacity before saving.
 
@@ -142,6 +155,10 @@ idle_seconds = 60
 [service]
 login_startup = false
 
+[meetings]
+enabled = false
+directory = "" # Uses ~/Documents/Meetings; otherwise a real absolute source folder.
+
 [exclusions]
 # Omit both lists to use fresh defaults from exclusion-presets.md.
 # apps = ["example.private-app"] # Hide from screenshots/sharing and pause Replay.
@@ -173,6 +190,8 @@ If you directly change `service.login_startup`, validate the TOML as above, then
 ```
 
 `status` is read-only. `stop` ends new capture while allowing indexing and maintenance. `shutdown` ends the coordinator too. Offline Pause/Stop/Shutdown update saved intent without launching it. Other offline controls can start it with capture held; Start/Resume explicitly permit recording.
+
+The `meetings` object in `daemon status` reports dependency availability, enabled/paused state, the source folder, worker state, last reported import count, sync counters, limits and errors. It contains no transcript text. A `limited` result can mean storage pressure or an importer bound; it does not indicate an OCR backlog. Counts describe the latest scan and may be stale when integration is disabled. Meeting search is currently in the viewer; the CLI `search` command remains screen OCR only.
 
 For service failures:
 

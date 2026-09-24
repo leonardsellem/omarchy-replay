@@ -6,6 +6,7 @@
 #include "fixture.h"
 #include "index_service.h"
 #include "storage_forecast.h"
+#include "meeting_index.h"
 
 #include <QCoreApplication>
 #include <QCommandLineParser>
@@ -30,9 +31,14 @@
 #include <QTimer>
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
+#include <csignal>
 #include <sys/file.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -67,16 +73,16 @@ void writeJson(const QString &path, const QJsonObject &object) {
 }
 struct Lease {
     QFile file;
-    explicit Lease(const QString &path) : file(path) {
+    explicit Lease(const QString &path, const QString &owner = "recording coordinator") : file(path) {
         const int fd = ::open(QFile::encodeName(path).constData(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
-        if (fd < 0) fail("Cannot open Replay coordinator lock");
+        if (fd < 0) fail("Cannot open Replay " + owner + " lock");
         if (!file.open(fd, QIODevice::ReadWrite, QFileDevice::AutoCloseHandle)) {
-            ::close(fd); fail("Cannot open Replay coordinator lock");
+            ::close(fd); fail("Cannot open Replay " + owner + " lock");
         }
         struct stat metadata{};
         if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_uid != geteuid() || metadata.st_nlink != 1)
-            fail("Invalid Replay coordinator lock");
-        if (flock(fd, LOCK_EX | LOCK_NB) < 0) fail("Another Replay recording coordinator is running");
+            fail("Invalid Replay " + owner + " lock");
+        if (flock(fd, LOCK_EX | LOCK_NB) < 0) fail("Another Replay " + owner + " is running");
         file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     }
 };
@@ -151,6 +157,12 @@ public:
     std::unique_ptr<RecordingEnvironment> environment;
     std::unique_ptr<IndexStatusReader> indexReader;
     QProcess indexWorker;
+    QProcess meetingWorker;
+    QByteArray meetingOutput;
+    QJsonObject meetingProgress;
+    QString meetingError;
+    bool meetingsAvailable = false, meetingWorkerStarted = false;
+    qint64 nextMeetingDetection = 0, retryMeetingsAfter = 0;
     QJsonObject progress, usage, workerReceipt, deletion, storageForecastResult;
     EnvironmentSnapshot desktop;
     QString intent = "stopped", state = "stopped", reason = "Recording is stopped.", configError, indexError;
@@ -251,7 +263,7 @@ public:
         saveIntent();
         log("Recording coordinator started.");
     }
-    ~Coordinator() { stopIndex(); closeCapture(); }
+    ~Coordinator() { stopMeetings(); stopIndex(); closeCapture(); }
 
     void checkStorage(bool registering = false) { checkStorageLocation(paths, document.config, registering); }
     void registerStorage() { registerStorageLocation(paths, document.config); }
@@ -287,7 +299,7 @@ public:
         }
     }
     void loseStorage(const QString &error) {
-        stopIndex(); closeCapture(); indexReader.reset(); historyReady = false;
+        stopMeetings(); stopIndex(); closeCapture(); indexReader.reset(); historyReady = false;
         progress = {}; usage = {}; storageError = error.left(500);
         storageForecastResult = {}; nextForecast = 0;
         gapStart = 0; gapReason.clear();
@@ -394,7 +406,64 @@ public:
         if (!indexWorker.waitForStarted(2000)) { retryIndexAfter = time + 10000; indexError = "Cannot launch the index worker."; }
         else { workerStarted = true; indexLastWork = time; }
     }
+    void collectMeetings() {
+        if (!meetingWorker.isOpen()) return;
+        meetingOutput += meetingWorker.readAllStandardOutput();
+        // The worker only emits numeric diagnostics. Never pass source contents
+        // or arbitrary exception messages through the coordinator status/log.
+        meetingWorker.readAllStandardError();
+        if (meetingOutput.size() > 65536) meetingOutput = meetingOutput.right(65536);
+        qsizetype newline = -1;
+        while ((newline = meetingOutput.indexOf('\n')) >= 0) {
+            const auto line = meetingOutput.left(newline); meetingOutput.remove(0, newline + 1);
+            const auto value = QJsonDocument::fromJson(line);
+            if (!value.isObject()) continue;
+            meetingProgress = value.object();
+            if (!meetingProgress.value("source_available").toBool())
+                meetingError = "The meetings folder is unavailable. Check its location in Settings.";
+            else if (meetingProgress.value("limited").toBool())
+                meetingError = "Meeting import reached a storage or import limit. Some sources may still be unindexed.";
+            else meetingError.clear();
+        }
+    }
+    void stopMeetings() {
+        if (meetingWorker.state() != QProcess::NotRunning) {
+            meetingWorker.terminate();
+            if (!meetingWorker.waitForFinished(300)) { meetingWorker.kill(); meetingWorker.waitForFinished(1000); }
+        }
+        collectMeetings(); meetingWorkerStarted = false;
+        meetingProgress["syncing"] = false;
+    }
+    void manageMeetings(qint64 time) {
+        meetingWorker.waitForFinished(0); collectMeetings();
+        if (time >= nextMeetingDetection) {
+            meetingsAvailable = meetingRecorderAvailable(); nextMeetingDetection = time + 60000;
+        }
+        if (!document.config.meetingsEnabled || !meetingsAvailable || indexingPaused || !deletion.isEmpty()) {
+            stopMeetings(); return;
+        }
+        if (meetingWorkerStarted && meetingWorker.state() == QProcess::NotRunning) {
+            meetingWorkerStarted = false;
+            meetingProgress["syncing"] = false;
+            meetingError = "Meeting indexing stopped; Replay will retry shortly.";
+            retryMeetingsAfter = time + 10000;
+        }
+        if (meetingWorker.state() != QProcess::NotRunning || time < retryMeetingsAfter) return;
+        meetingOutput.clear(); meetingError.clear();
+        meetingWorker.start(QCoreApplication::applicationFilePath(), {"daemon", "meeting-sync",
+            "--history", paths.historyDirectory, "--source", replayMeetingsDirectory(document.config),
+            "--retention-days", QString::number(document.config.retentionDays), "--follow",
+            "--max-disk-mib", QString::number(document.config.maxDiskMiB),
+            "--min-free-mib", QString::number(document.config.minFreeMiB),
+            "--parent-pid", QString::number(getpid())});
+        if (!meetingWorker.waitForStarted(1000)) {
+            retryMeetingsAfter = time + 10000; meetingError = "Cannot launch meeting indexing.";
+        } else { meetingWorkerStarted = true; meetingProgress["syncing"] = true; }
+    }
     void reload() {
+        // Explicit reload also refreshes optional dependency detection when
+        // settings bytes are unchanged (for example after plugin removal).
+        meetingsAvailable = meetingRecorderAvailable(); nextMeetingDetection = monotonicMs() + 60000;
         try {
             auto next = loadReplayConfig();
             if (next.original == document.original) { configError.clear(); return; }
@@ -411,13 +480,14 @@ public:
                 next.config.outputIdentity != document.config.outputIdentity || next.config.intervalSeconds != document.config.intervalSeconds;
             if (changedHistory && !deletion.isEmpty()) fail("Wait for the current history deletion before changing its folder");
             rememberConfig(next.original);
-            stopIndex(); closeCapture();
+            stopMeetings(); stopIndex(); closeCapture();
             if (changedHistory) { finishGap(); indexReader.reset(); historyReady = false; }
             document = std::move(next);
             if (changedHistory) {
                 paths.historyDirectory = replayHistoryDirectory(document.config);
                 progress = {}; usage = {}; workerReceipt = {}; lastRetained = 0;
                 previousReady = 0; nextIndexPoll = 0; nextStorageCheck = 0;
+                meetingProgress = {};
                 prepareHistory();
             }
             if (changedCapture) forecastSampleAfter = now();
@@ -430,6 +500,7 @@ public:
             }
             nextMaintenance = 0; nextCapture = 0; nextForecast = 0; storageForecastResult = {};
             captureRetryCount = 0; configError.clear();
+            nextMeetingDetection = 0; retryMeetingsAfter = 0; meetingError.clear();
             log("Validated recording settings reloaded.");
         } catch (const std::exception &error) { configError = QString::fromUtf8(error.what()).left(500); }
     }
@@ -486,6 +557,15 @@ public:
             result["worker_policy"] = ownedIndexWorkerPolicy(paths.historyDirectory, indexWorker.processId());
         else if (!workerReceipt.isEmpty()) result["worker_resources"] = workerReceipt.value("resources");
         result["storage_forecast"] = storageForecastResult;
+        auto meetings = meetingProgress;
+        meetings["available"] = meetingsAvailable;
+        meetings["enabled"] = c.meetingsEnabled;
+        meetings["directory"] = replayMeetingsDirectory(c);
+        meetings["paused"] = indexingPaused;
+        meetings["worker_running"] = meetingWorker.state() != QProcess::NotRunning;
+        meetings["worker_pid"] = qint64(meetingWorker.processId());
+        meetings["error"] = meetingError;
+        result["meetings"] = meetings;
         return result;
     }
     void requestExclusions() {
@@ -578,9 +658,9 @@ public:
             intent = "running"; nextCapture = 0; captureRetryCount = 0;
         } else if (action == "pause") intent = "paused";
         else if (action == "stop") intent = "stopped";
-        else if (action == "shutdown") { intent = "stopped"; shuttingDown = true; }
-        else if (action == "index-pause") { indexingPaused = true; stopIndex(); }
-        else if (action == "index-resume") { indexingPaused = false; retryIndexAfter = 0; }
+        else if (action == "shutdown") { intent = "stopped"; shuttingDown = true; stopMeetings(); }
+        else if (action == "index-pause") { indexingPaused = true; stopMeetings(); stopIndex(); }
+        else if (action == "index-resume") { indexingPaused = false; retryIndexAfter = 0; retryMeetingsAfter = 0; }
         else if (action == "reload") reload();
         else if (action == "delete-recent") {
             const qint64 seconds = request.value("seconds").toInteger();
@@ -589,7 +669,7 @@ public:
             if (!deletion.isEmpty()) fail("A history deletion is already in progress");
             if (!historyReady) fail("The history folder is unavailable");
             checkStorage();
-            stopIndex(); if (recorder) recorder->breakContinuity();
+            stopMeetings(); stopIndex(); if (recorder) recorder->breakContinuity();
             deletion = {{"from_ms", now() - seconds * 1000}, {"to_ms", now() + 1}, {"directory", paths.historyDirectory}};
             nextMaintenance = 0; nextForecast = 0; storageForecastResult = {};
         } else fail("Unknown recording control");
@@ -625,6 +705,7 @@ public:
         }
         if (time >= nextMaintenance) maintenance(time);
         if (time >= nextIndexPoll) { progress = indexReader->status(); nextIndexPoll = time + 1000; }
+        manageMeetings(time);
         if (deletion.isEmpty()) manageIndex(time);
         if (intent != "running") { transition(intent, intent == "paused" ? "Recording is paused until you resume." : "Recording is stopped."); return; }
         if (time < nextCapture) return;
@@ -710,6 +791,59 @@ public:
         }
     }
 };
+
+int syncMeetingSources(const QString &history, const QString &source, int retentionDays,
+                       quint64 maxDiskBytes, quint64 minFreeBytes, bool follow,
+                       qint64 parentPid, const std::function<bool()> &stopRequested) {
+    if (parentPid && (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || getppid() != parentPid))
+        fail("Meeting index coordinator is no longer running");
+    // This process owns no recording or transcription work. A distinct process
+    // bounds shutdown even if a source filesystem stalls on a read.
+    setpriority(PRIO_PROCESS, 0, 15);
+    const auto canceled = [&] { return stopRequested() || (parentPid && getppid() != parentPid); };
+    struct stat archive{};
+    if (lstat(QFile::encodeName(history).constData(), &archive) != 0 || !S_ISDIR(archive.st_mode) ||
+        archive.st_uid != getuid() || (archive.st_mode & 0077)) fail("Meeting indexing requires a private history folder");
+    Lease lease(history + "/.meeting-index.lock", "meeting indexer");
+    MeetingImporter importer(history, source, canceled, maxDiskBytes, minFreeBytes);
+    bool settling = true;
+    bool limited = false;
+    int scanned = 0, imported = 0, updated = 0, removed = 0;
+    while (!canceled()) {
+        const auto timestamp = now();
+        const auto sync = importer.sync(timestamp, timestamp - qint64(retentionDays) * 86400000);
+        scanned += sync.scanned; imported += sync.imported; updated += sync.updated; removed += sync.removed;
+        limited = limited || sync.limited;
+        if (canceled() || sync.canceled) break;
+        const bool syncing = sync.more || (settling && sync.sourceAvailable);
+        QJsonObject progress{{"syncing", syncing}, {"source_available", sync.sourceAvailable},
+            {"count", listMeetings(history, 1).totalMatches}, {"scanned", scanned},
+            {"imported", imported}, {"updated", updated}, {"removed", removed},
+            {"limited", limited}, {"last_sync_ms", timestamp}};
+        const QByteArray bytes = QJsonDocument(progress).toJson(QJsonDocument::Compact) + '\n';
+        if (std::fwrite(bytes.constData(), 1, bytes.size(), stdout) != size_t(bytes.size()) || std::fflush(stdout) != 0)
+            return 0;
+        int delay = 100;
+        if (!sync.more) {
+            if (settling && sync.sourceAvailable) { settling = false; delay = 1000; }
+            else {
+                if (!follow) break;
+                settling = true; delay = 60000;
+                scanned = imported = updated = removed = 0;
+                limited = false;
+            }
+        }
+        // poll is interrupted by SIGTERM/parent death without a recurring wake
+        // timer. A quiet optional integration sleeps once for the full minute.
+        const qint64 wakeAt = monotonicMs() + delay;
+        while (!canceled()) {
+            const qint64 remaining = wakeAt - monotonicMs();
+            if (remaining <= 0) break;
+            ::poll(nullptr, 0, int(remaining));
+        }
+    }
+    return 0;
+}
 } // namespace
 
 int runRecordingService(const std::function<bool()> &stopRequested, bool synthetic, const QString &syntheticEnvironment) {
@@ -752,7 +886,7 @@ int runRecordingService(const std::function<bool()> &stopRequested, bool synthet
         }
         QThread::msleep(50);
     }
-    coordinator.finishGap(); coordinator.saveIntent(); coordinator.stopIndex(); coordinator.closeCapture();
+    coordinator.finishGap(); coordinator.saveIntent(); coordinator.stopMeetings(); coordinator.stopIndex(); coordinator.closeCapture();
     coordinator.log("Recording coordinator stopped."); server.close();
     return 0;
 }
@@ -764,7 +898,14 @@ int recordingCommand(const QStringList &arguments, const std::function<bool()> &
         {"synthetic-environment", "Synthetic lifecycle observations; requires --synthetic.", "path"},
         {"output", "Explicit display selection when initializing settings.", "name"},
         {"seconds", "Recent deletion interval, or debug duration (1–300 seconds; default 30).", "seconds"},
-        {"confirmed", "Confirm deletion of the requested interval."}});
+        {"confirmed", "Confirm deletion of the requested interval."},
+        {"history", "Internal meeting index archive.", "path"},
+        {"source", "Internal meeting source folder.", "path"},
+        {"retention-days", "Internal meeting age window.", "days"},
+        {"max-disk-mib", "Internal meeting archive allowance.", "mib"},
+        {"min-free-mib", "Internal meeting free-disk reserve.", "mib"},
+        {"parent-pid", "Internal meeting coordinator process.", "pid"},
+        {"follow", "Internal meeting source reconciliation loop."}});
     parser.process(arguments);
     const auto positional = parser.positionalArguments();
     if (positional.size() != 1) fail("Choose exactly one recording service action");
@@ -774,6 +915,24 @@ int recordingCommand(const QStringList &arguments, const std::function<bool()> &
     if (parser.isSet("output") && action != "init") fail("Display selection is only valid for daemon init");
     if (parser.isSet("seconds") && action != "delete-recent" && action != "debug") fail("Duration requires delete-recent or debug");
     if (parser.isSet("confirmed") && action != "delete-recent") fail("Deletion confirmation requires delete-recent");
+    for (const auto &option : {"history", "source", "retention-days", "max-disk-mib", "min-free-mib", "parent-pid", "follow"})
+        if (parser.isSet(option) && action != "meeting-sync") fail("Meeting worker options require meeting-sync");
+    if (action == "meeting-sync") {
+        bool validDays = false, validPid = true, validMax = false, validFree = false;
+        const int days = parser.value("retention-days").toInt(&validDays);
+        const qint64 maximum = parser.value("max-disk-mib").toLongLong(&validMax);
+        const qint64 reserve = parser.value("min-free-mib").toLongLong(&validFree);
+        const qint64 parent = parser.isSet("parent-pid") ? parser.value("parent-pid").toLongLong(&validPid) : 0;
+        const QString history = parser.value("history"), source = parser.value("source");
+        if (!validDays || days < 1 || days > 3650 || !validPid || parent < 0 || parent > INT_MAX ||
+            !validMax || maximum < 64 || maximum > 1048576 || !validFree || reserve < 0 || reserve > 1048576 ||
+            (parser.isSet("parent-pid") && parent < 1) || (parser.isSet("follow") && !parent) ||
+            !QDir::isAbsolutePath(history) || QDir::cleanPath(history) != history || history == "/" ||
+            !QDir::isAbsolutePath(source) || QDir::cleanPath(source) != source || source == "/")
+            fail("Meeting worker requires absolute folders, a valid retention window and a live parent for follow mode");
+        return syncMeetingSources(history, source, days, quint64(maximum) * MiB, quint64(reserve) * MiB,
+                                  parser.isSet("follow"), parent, stopRequested);
+    }
     if (action == "run") return runRecordingService(stopRequested, parser.isSet("synthetic"), parser.value("synthetic-environment"));
     QJsonObject result;
     if (action == "paths") {

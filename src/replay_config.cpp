@@ -6,6 +6,7 @@
 #include <QLockFile>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QStandardPaths>
 #include <toml++/toml.hpp>
 #include <cmath>
 #include <sstream>
@@ -124,7 +125,19 @@ QString replayHistoryDirectory(const ReplayConfig& config) {
     return config.storageDirectory.isEmpty() ? replayPaths().historyDirectory : QDir::cleanPath(config.storageDirectory);
 }
 
+QString replayMeetingsDirectory(const ReplayConfig& config) {
+    return config.meetingsDirectory.isEmpty() ? QDir::homePath() + "/Documents/Meetings" : config.meetingsDirectory;
+}
+
+bool meetingRecorderAvailable() {
+    return !QStandardPaths::findExecutable("omarchy-meeting-recorder").isEmpty();
+}
+
 void validateReplayConfig(const ReplayConfig& config) {
+    shortText(config.meetingsDirectory, 4096, "meetings directory");
+    if (!config.meetingsDirectory.isEmpty() && (!QDir::isAbsolutePath(config.meetingsDirectory) ||
+        QDir::cleanPath(config.meetingsDirectory) != config.meetingsDirectory || config.meetingsDirectory == "/"))
+        invalid("meetings directory must be an absolute folder path without a trailing slash, . or ..");
     shortText(config.storageDirectory, 4096, "storage directory");
     if (!config.storageDirectory.isEmpty() && (!QDir::isAbsolutePath(config.storageDirectory) ||
         QDir::cleanPath(config.storageDirectory) != config.storageDirectory || config.storageDirectory == "/"))
@@ -189,6 +202,8 @@ ReplayConfigDocument loadReplayConfig(const QString& path) {
     read(indexing, "idle_seconds", config.idleSeconds);
     read(section(table, "service"), "login_startup", config.loginStartup);
     read(section(table, "agent"), "preferred", config.preferredAgent);
+    read(section(table, "meetings"), "enabled", config.meetingsEnabled);
+    read(section(table, "meetings"), "directory", config.meetingsDirectory);
     if (const auto* exclusions = section(table, "exclusions")) {
         // An existing explicit app list is authoritative. Do not add newly
         // introduced skip defaults or invalidate a full legacy 64-app policy.
@@ -234,6 +249,10 @@ ReplayConfigResolution resolveReplayConfig() {
 void saveReplayConfig(const ReplayConfig& config, const QByteArray& expectedOriginal, const QString& path) {
     validateReplayConfig(config);
     auto table = parse(expectedOriginal);
+    bool previouslyEnabled = false;
+    read(section(table, "meetings"), "enabled", previouslyEnabled);
+    if (config.meetingsEnabled && !previouslyEnabled && !meetingRecorderAvailable())
+        invalid("install Omarchy Meeting Recorder before enabling meeting transcripts");
     auto& capture = writableSection(table, "recording");
     capture.insert_or_assign("output", config.output.toStdString());
     capture.insert_or_assign("output_identity", config.outputIdentity.toStdString());
@@ -252,6 +271,9 @@ void saveReplayConfig(const ReplayConfig& config, const QByteArray& expectedOrig
     indexing.insert_or_assign("idle_seconds", config.idleSeconds);
     writableSection(table, "service").insert_or_assign("login_startup", config.loginStartup);
     writableSection(table, "agent").insert_or_assign("preferred", config.preferredAgent.toStdString());
+    auto& meetings = writableSection(table, "meetings");
+    meetings.insert_or_assign("enabled", config.meetingsEnabled);
+    meetings.insert_or_assign("directory", config.meetingsDirectory.toStdString());
     auto& exclusions = writableSection(table, "exclusions");
     toml::array apps;
     for (const auto& app : config.excludedApps) apps.push_back(app.toStdString());

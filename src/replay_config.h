@@ -36,9 +36,15 @@ struct ReplayConfig {
     QStringList skippedApps = defaultSkippedApps();
     QVector<WindowExclusion> excludedWindows;
     QString preferredAgent;
+    bool meetingsEnabled = false;
+    // Empty uses Meeting Recorder's default ~/Documents/Meetings folder.
+    QString meetingsDirectory;
 };
 
 QString replayHistoryDirectory(const ReplayConfig& config);
+QString replayMeetingsDirectory(const ReplayConfig& config);
+// Detection only: never execute the optional recorder to inspect its presence.
+bool meetingRecorderAvailable();
 
 struct ReplayConfigDocument {
     ReplayConfig config;

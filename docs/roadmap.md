@@ -129,6 +129,19 @@ Recommended first pilot: **find what someone shared after a remembered meeting**
 
 At the milestone, settle search behavior for incomplete names or clues, how hits lead to images and neighboring moments, bounded/paginated results, source links, missing coverage, and the text/image context budget. Test ambiguous names and OCR errors. The meeting is a user-supplied clue: Replay can recover information that appeared on screen, without assuming audio capture or structured meeting, app, URL or project metadata. Automatic entity association is not a prerequisite.
 
+## Optional completed-meeting integration: implemented
+
+Confirmed direction, 2026-09-24: integrate with an installed [Omarchy Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) without bundling its recording or transcription code. When the usable recorder is detected, offer an optional integration in Settings, disabled until the user enables it. Completed-meeting indexing is implemented. It does not require changes to the external recorder.
+
+- Treat each meeting as one searchable item: title, recorded start, source link and full transcript, with search hits grouped under that meeting.
+- Place one marker at the meeting's known start on Replay's timeline. Opening a match shows the transcript with its matching passages and lets the user browse screen history around the start.
+- Offer a keyboard-accessible source filter: **All**, **Screen text** and **Meetings**. Keep transcript matches separate from OCR highlights on images.
+- Do not require sentence-to-screen synchronization, live transcription, automatic call detection or recording controls for this version. Recorder pauses do not affect the meeting-level search model.
+
+Replay indexes transcript text and metadata and links to the recorder's original files; the recorder continues to own audio. The importer reconciles source edits, renames and removals. Age and size limits expire local copies; explicit deletion records a boundary so rescanning does not restore deleted meetings. Imported or recovered recordings with uncertain dates must not be presented as verified timeline anchors. Missing screen history does not prevent reading a meeting transcript and must be shown explicitly.
+
+The [meeting guide](meetings.md) documents opt-in, retention, limits and keyboard controls. This adds an optional evidence source for later agent-assisted recall. The base screen-history experience and its privacy/capture controls remain independent of the recorder. See the [decision record](omarchy-agent-exploration.md#2026-09-24--optional-completed-meeting-recall).
+
 ## Further work
 
 The [post-trial efficiency research](pipeline-efficiency-research.md) proposes scheduling, verified OCR reuse, and storage comparisons in that order. The [first implementation and broader comparison](scheduling-efficiency-iteration.md) refine scheduling and establish exact-reuse correctness. Region/scroll reuse and storage comparisons remain experiments.

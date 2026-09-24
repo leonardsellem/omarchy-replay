@@ -3,6 +3,7 @@
 Find things you saw on your screen. Omarchy Replay records one selected display, recognizes its text locally, and gives you a searchable timeline of the original images.
 
 - Search visible text, including partial words as you type.
+- Optionally search completed Meeting Recorder transcripts, grouped by meeting.
 - Browse moments with the keyboard and copy highlighted OCR lines.
 - Drag over a saved image to recognize and copy text from that area.
 - Open history, settings and recording controls from the top bar.
@@ -52,9 +53,11 @@ Use the absolute launcher path from your installed binding if your home director
 | --- | --- |
 | Super+Alt+R | Summon or dismiss the floating viewer after installation. |
 | / or Ctrl+F | Search. |
+| Alt+S | Focus the All / Screen text / Meetings filter when meeting integration is available. |
 | Up / Down or K / J | Previous / next match. |
 | Left / Right or H / L | Previous / next moment. |
-| Ctrl+C | Copy matching OCR lines; copy all recognized text when no search is active. |
+| Ctrl+C | Copy matching OCR lines or transcript passages; copy all text when no search is active. Selected transcript text takes precedence. |
+| [ / ] or Alt+Up / Alt+Down | Previous / next matching passage in a meeting transcript. |
 | S | Start keyboard text selection outside search. Arrows move it; Shift+arrows resize it; Enter copies. |
 | I | Open recording controls and settings. |
 | ? | Show all shortcuts. |
@@ -83,6 +86,16 @@ Exclusions separate **Skip in Replay** from **Hide from screenshots and sharing*
 
 For storage rules, exclusions and the full TOML example, read the [recording and configuration guide](docs/background-recording.md). Earlier installations used `oma-rewind`; migrate those paths before installing this release, as described in the guide.
 
+## Optional meeting transcripts
+
+Omarchy Meeting Recorder is a separate Omarchy plugin that records and transcribes calls. [Installation instructions and documentation](https://github.com/jankeesvw/omarchy-meeting-recorder) are available in its repository.
+
+Once installed, open Replay's **Settings → Meetings** and enable **Include meeting transcripts**. Confirm its meetings folder; the default is `~/Documents/Meetings`.
+
+Replay indexes completed transcripts in the background. Search returns each meeting once, with a count of matching passages. Use **All / Screen text / Meetings** to filter results, then open a meeting to read, navigate and copy its transcript. Meetings with a known recording start also have a marker on the timeline. **Browse screens** opens nearby retained screen history; **Open recording** opens the original in Meeting Recorder.
+
+Audio and transcription stay with Meeting Recorder. Replay does not start recordings or transcribe calls. Turning integration off stops new imports while retaining already indexed transcripts. Replay's age and size limits apply to those copies, without deleting the recorder's originals. See [meeting integration](docs/meetings.md) for timing, storage and configuration details.
+
 ## Use with your coding agent
 
 Settings includes prompts for configuration, exclusions and resource tuning. Copy one into the coding agent you already use, then describe the change you want. Each prompt includes your installed executable, resolved paths, supported TOML options and diagnostic commands. It works without a repository checkout.
@@ -104,8 +117,11 @@ TOML options: [recording] output, output_identity, interval_seconds;
 [storage] directory, retention_days, max_disk_mib, min_free_mib;
 [indexing] active_cpu_percent, idle_cpu_percent, request_cpu_percent,
 pressure_cpu_percent, cpu_ceiling_percent, idle_seconds;
-[service] login_startup; [exclusions] apps, skip_apps; [[exclusions.windows]] app_id,
+[service] login_startup; [meetings] enabled, directory; [exclusions] apps, skip_apps; [[exclusions.windows]] app_id,
 title_regex, scope, address, compositor_instance. [agent] preferred is reserved.
+Meeting imports are optional and off by default. An empty meetings directory uses
+~/Documents/Meetings. Enable only when requested and the recorder is installed;
+this indexes transcripts without starting audio recording.
 CPU percentages describe one core. An empty storage directory uses the default;
 switching folders leaves the old archive in place. Shortening retention or reducing storage can delete
 older history. New moments replace the oldest history as the allowance fills. Exclusion app IDs are exact; window matchers in one rule are

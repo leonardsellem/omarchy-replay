@@ -1,6 +1,6 @@
 # Architecture
 
-Omarchy Replay stores sampled screen images and makes their visible text searchable. A native Qt viewer reads that history. A separate coordinator owns recording, retention and one OCR worker. Capture, OCR, storage and search all run locally.
+Omarchy Replay stores sampled screen images and makes their visible text searchable. A native Qt viewer reads that history. A separate coordinator owns recording, retention and one OCR worker. An optional importer adds completed transcripts from an installed Omarchy Meeting Recorder. Capture, indexing, storage and search all run locally.
 
 The screen image is the source evidence. OCR helps find it and can contain errors. Replay does not infer which person, conversation or project owns every visible region. App/window metadata used for capture policy is live desktop state, not a complete historical app inventory.
 
@@ -14,6 +14,7 @@ flowchart LR
   Capture --> DB[(SQLite history)]
   Archive --> OCR[One OCR worker]
   OCR --> DB
+  Meetings[External completed meeting files] -. Optional importer .-> DB
   DB --> Viewer[Qt timeline and search]
   Archive --> Viewer
   Viewer --> Control[Local control socket]
@@ -54,7 +55,7 @@ This storage mode favors recoverable evidence and immediate image access. Shared
 
 ## History model
 
-Each archive has an `index.sqlite` database and its media files:
+Each archive has an `index.sqlite` database and its media files. Meeting tables are added when needed:
 
 | Record | Purpose |
 | --- | --- |
@@ -65,6 +66,8 @@ Each archive has an `index.sqlite` database and its media files:
 | `index_requests`, `index_schedule` | Expiring priority requests and scheduling state. |
 | `history_media` | Media publication and retirement for bounded cleanup. |
 | `history_gaps` | Known interruptions, such as a paused recorder or coordinator restart. |
+| `meeting_records`, `meeting_text` | Imported meeting identity, title, transcript, source link, time confidence and separate FTS5 search. |
+| `meeting_tombstones`, `meeting_deleted_ranges`, `meeting_state` | Opaque deletion identities and time boundaries that prevent reimporting removed history. |
 
 A frame can be `pending`, `ready`, `disabled` or `failed`. A pending frame has an original image but no searchable OCR text yet. Coverage distinguishes indexed frames from indexed observations because repeated observations can share one result.
 
@@ -88,6 +91,20 @@ Each viewer runs at most one short-lived Tesseract child for selection OCR. Repl
 
 The crop travels through a bounded memory pipe, without a temporary image file. The child uses one OpenMP thread, nice level 10 and a 10-second wall timeout. Crops are limited to 32 × 1024² pixels and 16,384 pixels per dimension. Recognition follows Omarchy's text-capture settings: a single text block, LSTM recognition, 300 DPI and preserved interword spaces. It uses the installed language data selected by `OMARCHY_OCR_LANGS`, falling back to `eng` when unset or empty. This requested work is separate from the background indexer's CPU allowances and worker ceiling. It runs only after a selection is submitted, with no continuous hover processing.
 
+## Optional meeting import
+
+`meetings.enabled` defaults to `false`. Detection checks for `omarchy-meeting-recorder` on `PATH` without executing it. The optional Settings tab exposes that choice and a source folder; an empty `meetings.directory` uses `~/Documents/Meetings`. Replay consumes completed `.meeting-recorder` manifests and `transcript.md` files. The external recorder owns audio capture, transcription, playback and its original files. Enabling this integration does not start a call recording or screen capture.
+
+One separate importer process runs at nice level 15 while the integration is enabled, the dependency is present and indexing is unpaused. Its archive lease excludes another importer. It visits at most 32 source entries and reads at most 2 MiB of changed text per batch, with a 100 ms pause between continuing batches. Files must retain the same identity, size and timestamps across two passes and be at least one second old. Initial passes run one second apart; a completed reconciliation then sleeps for a minute using a signal-interruptible wait. No audio, images, OCR or speech model is involved.
+
+The importer validates file ownership and types, rejects symlinks and ambiguous manifests, and pins the archive directory/database identity. Config changes, indexing pause, storage loss, explicit deletion and shutdown stop the child before dependent work proceeds. Shutdown has a bounded terminate/kill path, and parent-death signaling plus the installed unit's control-group cleanup prevent an orphan. Source reads and parsing run outside the capture loop. SQLite writes remain short and can contend with the other archive writers.
+
+Meeting text is stored separately from screen OCR. Viewer filters select **All**, **Screen text** or **Meetings**; a meeting appears once, with its matching transcript lines grouped as passages. Transcript rendering is plain text, including untrusted source content. Meeting matches never produce image OCR highlights. The current CLI `search` still returns screen frames only; dedicated agent retrieval remains planned.
+
+A known recorder-supplied start anchors a meeting on the timeline. Imported recordings and absent start times remain searchable without a marker. **Browse screens** requires an observation within ten seconds of a known start and rejects known gaps; it does not imply sentence-level synchronization. Audio pauses, interruptions and uncertain source dates are not reconstructed.
+
+The importer shares the archive's age, disk allowance and free-space reserve. It checks space before publication and can defer imports while bounded cleanup makes room. Additional implementation limits are 512 KiB per transcript, 64 KiB per manifest, 5,000 meetings and 64 MiB of source text. These limits and low priority do not constitute a CPU quota: the OCR pacing settings and OCR worker ceiling do not govern this process. Include its CPU, memory and I/O when measuring Replay's total cost. See the [meeting guide](meetings.md) for source updates, controls and limits.
+
 ## CPU scheduling
 
 Capture and OCR have different costs. Capture acquires, hashes and compresses pixels. OCR decodes originals, plans changes and recognizes text. A lower OCR allowance delays that work; it does not remove its total CPU cost.
@@ -106,7 +123,7 @@ The scheduler combines compositor idle notifications, Linux CPU pressure stall i
 
 `WorkBudget` compares process CPU time with elapsed time at OCR checkpoints and inserts short sleeps when work exceeds the allowance. Tesseract must reach a checkpoint to respond. This cooperative pacing does not cap every decode, allocation or compression operation.
 
-A separate limit requests a **60% whole-worker ceiling** through a managed systemd user service and cgroup v2. Replay verifies worker membership and effective limits, then reports enforcement separately from the requested setting. If that facility is unavailable, cooperative pacing and low process priority remain active; the UI reports the ceiling as unavailable. This ceiling does not cover the capture coordinator or viewer.
+A separate limit requests a **60% whole-worker ceiling** through a managed systemd user service and cgroup v2. Replay verifies worker membership and effective limits, then reports enforcement separately from the requested setting. If that facility is unavailable, cooperative pacing and low process priority remain active; the UI reports the ceiling as unavailable. This ceiling covers the OCR worker, not the capture coordinator, viewer or optional meeting importer.
 
 The scripts limit OpenMP to one thread. Worker lifecycle monitoring prevents an orphaned managed worker from continuing after its controller exits. Low scheduling and I/O priority reduce competition but do not establish a foreground latency guarantee.
 
@@ -135,6 +152,8 @@ Maintenance deletes bounded batches of observations, then unreferenced frames an
 Older prototype databases without incremental vacuum cannot shrink their index in place. If that index alone exceeds a reduced allowance, Replay preserves the remaining history and reports that separate compaction or a larger allowance is needed. New shared histories support bounded index reclamation.
 
 Recent-history deletion stops interfering work, records its interval durably and completes bounded cleanup. Settings reviews shorter retention, a smaller allowance or a larger free-space reserve; recent deletion requires separate confirmation. Direct TOML edits are operational: lowering retention applies the shorter window when the coordinator accepts it. Replay does not promise forensic erasure from backups, filesystem snapshots or underlying storage.
+
+Meeting expiration and interval deletion use the known meeting start, or first import time when its date is unknown. Deletion removes the whole indexed meeting; a meeting starting before the requested interval remains even if the call continued into it. Opaque tombstones and deletion ranges survive rescans, including an interval deleted before the first import. Disabling integration preserves cached meetings until retention or deletion removes them. Removing a source meeting is reconciled after a complete readable scan; an unavailable root does not erase cached transcripts. Replay never modifies the external recording or transcript.
 
 ## Storage location and configuration
 
@@ -179,6 +198,8 @@ Pending OCR survives process exit. Startup recovers incomplete media publication
 
 Status includes capture intent and block reason, indexing coverage, oldest pending age, archive usage and worker policy/enforcement. Coordinator logs are bounded. Error logs and status can contain local paths or window information and remain private diagnostics.
 
+The normal status response also includes `meetings`: dependency availability, enabled/paused state, source folder, worker state, last reported count, sync counters, a `limited` flag and an error. These are cached importer diagnostics with no transcript text. They do not add source scans to `bar-status` polling. Counts describe the last scan and can be stale after integration is disabled. A limited import can indicate storage pressure or an implementation bound; raising OCR CPU settings does not resolve either condition.
+
 Storage forecasts read at most 2,001 recent observations from the last 24 hours once per minute, using existing numeric metadata. The estimate credits bounded capture intervals, rather than time spent locked or paused, and counts each new original once. It reports the active recording hours that the effective rolling allowance can hold, after five minutes of sampled activity. With at least seven retained calendar days, existing archive size and time bounds also support a rough daily-growth estimate, projected capacity in days, and space for the selected age window. Settings reuses these rates when the user changes size, reserve or age. Changing capture settings or the archive saves one sampling boundary with the existing coordinator state; rates then use only later observations, including after restart. Calendar projections wait until older observations have left the archive, so their bytes are not attributed to the new settings. Estimates do not guarantee future workload or database growth. No resource-history series is recorded.
 
 Capture diagnostics are opt-in: `daemon debug --seconds 30` enables bounded in-memory counters on an already running coordinator, then disables them. The range is 1–300 seconds, with a server-side expiry even if the client exits. Output contains fixed field/event names and counts, never metadata values, images or OCR. Offline debugging does not start the service or change recording intent. CPU, memory and power measurements remain explicit diagnostic work.
@@ -189,7 +210,7 @@ Synthetic histories test storage, search, scheduling, deletion and lifecycle beh
 
 The opt-in [exclusion scope check](../scripts/exclusion_scope_check.py) verifies ordinary screenshot pixels before and after changing privacy masks, preservation of sensitive/self masks, and policy updates while the coordinator is stopped or paused. Run it after building with `python3 scripts/exclusion_scope_check.py --dir runs/exclusion-scope-check-new`, using a fresh output directory. It requires Hyprland, mpv, grim and FFmpeg and owns an isolated compositor and synthetic windows. Meeting-window checks use synthetic app identities; they do not establish behavior in an actual Meet or Zoom call.
 
-Performance comparisons must report retained observations, indexed coverage, oldest pending age, CPU, memory, disk growth and foreground impact together. Count the coordinator, worker and managed child when measuring process cost. Distinguish OCR CPU time from elapsed time that includes pacing. Compare the same images and recognition results when evaluating an optimization.
+Performance comparisons must report retained observations, indexed coverage, oldest pending age, CPU, memory, disk growth and foreground impact together. Count the coordinator, OCR worker, managed child and optional importer when measuring process cost. Distinguish OCR CPU time from elapsed time that includes pacing. Compare the same images and recognition results when evaluating an optimization.
 
 Current limits include one selected display, local storage, imperfect OCR and sampling gaps. S3-compatible offload, cross-device access, semantic retrieval and a dedicated agent context interface remain roadmap work. Existing CLI search/extraction can supply evidence to a coding agent, but Replay does not execute that agent's tasks.
 
@@ -202,6 +223,8 @@ Current limits include one selected display, local storage, imperfect OCR and sa
 | `src/recording_environment.cpp` | Compositor/session/display/exclusion checks. |
 | `src/capture.cpp` | Native Wayland image acquisition. |
 | `src/recorder.cpp` | Archives, OCR, SQLite search and history cleanup. |
+| `src/meeting_index.cpp` | Bounded external transcript import, separate search and deletion/retention integration. |
+| `src/meeting_view.cpp` | Plain-text transcript display, passage navigation and original-recording links. |
 | `src/index_scheduler.cpp`, `src/work_budget.cpp` | Adaptive policy and cooperative pacing. |
 | `src/index_resources.cpp` | Managed worker lifecycle and verified limits. |
 | `src/replay_config.cpp` | Paths, TOML validation and atomic settings writes. |

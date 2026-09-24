@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -36,6 +37,40 @@ def main():
                         '[exclusions]\napps=[]\n')
         config.write_text(valid_config)
         history = root / 'data/omarchy-replay/history'
+        # Detection is read-only. This executable must never run, and all
+        # meeting content in this test is fictional and locally generated.
+        tools = root / 'bin'; tools.mkdir()
+        recorder_stub = tools / 'omarchy-meeting-recorder'
+        recorder_marker = root / 'recorder-was-launched'
+        recorder_stub.write_text('#!/bin/sh\n: > "' + str(recorder_marker) + '"\n')
+        recorder_stub.chmod(0o700)
+        # Isolate dependency discovery even on hosts with the real recorder
+        # installed; removing the fixture must not find a fallback executable.
+        for command in ('python3', 'systemctl', 'systemd-run', 'hyprctl', 'ffmpeg', 'ffprobe', 'tesseract'):
+            resolved = shutil.which(command)
+            if resolved:
+                (tools / command).symlink_to(resolved)
+        env['PATH'] = str(tools)
+        meetings = root / 'meetings'; meetings.mkdir(mode=0o700)
+        meeting_config = valid_config + '[meetings]\nenabled=true\ndirectory=' + json.dumps(str(meetings)) + '\n'
+
+        def meeting_fixture(name):
+            folder = meetings / name; folder.mkdir(mode=0o700)
+            transcript = folder / 'transcript.md'
+            transcript.write_text('# Fictional planning meeting\n\n[00:00] Discuss the synthetic paper invoice.\n')
+            manifest = folder / (name + '.meeting-recorder')
+            manifest.write_text(json.dumps(dict(title='Synthetic ' + name, started_at=int(time.time()) - 10, duration_secs=5)))
+            for file in (transcript, manifest):
+                os.utime(file, (time.time() - 5, time.time() - 5))
+            return folder
+
+        def meeting_count():
+            with sqlite3.connect(history / 'index.sqlite', timeout=2) as db:
+                if not db.execute("SELECT 1 FROM sqlite_master WHERE name='meeting_records'").fetchone():
+                    return 0
+                return db.execute('SELECT count(*) FROM meeting_records').fetchone()[0]
+
+        meeting_fixture('first')
         sensor = root / 'environment.json'
         monitor = dict(id=1, name='TEST-1', make='Synthetic', model='Fixture', serial='TEST-1', description='Synthetic display',
                        width=1920, height=1080, scale=1.0, transform=0, x=0, y=0, disabled=False, dpmsStatus=True, mirrorOf='none')
@@ -99,6 +134,41 @@ def main():
         try:
             launch()
             assert status()['intent'] == 'stopped' and count() == 0
+            assert status()['meetings']['available'] and not status()['meetings']['enabled']
+            assert meeting_count() == 0 and not status()['meetings']['worker_running']
+            free_mib = os.statvfs(root).f_bavail * os.statvfs(root).f_frsize // (1024 * 1024)
+            if free_mib < 1044480:
+                blocked = meeting_config.replace('min_free_mib=0', 'min_free_mib=' + str(free_mib + 4096))
+                config.write_text(blocked); call('reload')
+                eventually(lambda: status()['meetings'].get('limited') and not status()['meetings'].get('syncing'))
+                assert status()['meetings']['error'], 'limited meeting import was reported without an explanation'
+                assert meeting_count() == 0 and count() == 0, 'meeting import ignored free-disk reserve'
+            config.write_text(meeting_config); call('reload')
+            eventually(lambda: meeting_count() == 1)
+            assert status()['intent'] == 'stopped' and count() == 0, 'meeting opt-in started screen capture'
+            eventually(lambda: status()['meetings'].get('count') == 1)
+            call('meeting-sync', '--history', str(history), '--source', str(meetings),
+                 '--retention-days', '1', '--max-disk-mib', '64', '--min-free-mib', '0', success=False)
+            call('index-pause')
+            assert not status()['meetings']['worker_running']
+            meeting_fixture('second')
+            time.sleep(1.2)
+            assert meeting_count() == 1, 'paused indexing imported a new meeting'
+            call('index-resume')
+            eventually(lambda: meeting_count() == 2)
+            config.write_text(meeting_config.replace('enabled=true', 'enabled=false')); call('reload')
+            assert not status()['meetings']['worker_running'] and meeting_count() == 2
+            meeting_fixture('third')
+            time.sleep(1.2)
+            assert meeting_count() == 2, 'disabled integration imported a new meeting'
+            # Missing optional dependency leaves valid recording configuration
+            # and retained imports intact; it cannot silently opt back in.
+            recorder_stub.unlink()
+            config.write_text(meeting_config); call('reload')
+            eventually(lambda: not status()['meetings']['available'])
+            assert not status()['meetings']['worker_running'] and not status()['config_error']
+            assert meeting_count() == 2 and not recorder_marker.exists()
+            config.write_text(valid_config); call('reload')
             assert not status()['exclusions_pending'] and not status()['exclusions_error'], 'synthetic service attempted compositor mask installation'
             # Exclusion edits are accepted while stopped or paused without
             # activating recording/indexing or invoking a native installer.
