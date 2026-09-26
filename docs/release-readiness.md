@@ -1,8 +1,8 @@
 # Release readiness
 
-Reviewed 2026-09-25. Version **0.1.0** is being prepared for the first public release. The owner reports successful laptop use, adding a second-machine result to the desktop testing. The repository is still private and **not submitted to the Omarchy marketplace**. The exact laptop checks, final publication snapshot and marketplace review remain to be recorded.
+Updated 2026-09-26. The repository is public. The owner confirmed the installation check and authorized publishing **0.1.0** and submitting it to the Omarchy marketplace. This closes the owner installation-check gate; it does not establish performance or lifecycle compatibility on every machine. Release publication and marketplace listing approval remain separate outcomes.
 
-Use the [weekend runbook](release-weekend.md), [draft release notes](releases/0.1.0.md) and [marketplace issue draft](marketplace-submission.md) for the remaining steps. This document separates current evidence from unverified paths.
+Use the [weekend runbook](release-weekend.md), [release notes](releases/0.1.0.md) and [marketplace submission body](marketplace-submission.md). Check the [release page](https://github.com/rblalock/omarchy-replay/releases/tag/v0.1.0) for publication and the marketplace issue for listing approval. Earlier dated evidence below retains the state at each review.
 
 ## Marketplace requirements
 
@@ -13,13 +13,13 @@ Listings are validated against an exact commit. The [security baseline](https://
 | Requirement | Current state |
 | --- | --- |
 | License | MIT selected; root [LICENSE](../LICENSE) and [third-party notices](../THIRD_PARTY_NOTICES.md) added. |
-| Public repository | Still private. Visibility has not been changed. |
+| Public repository | The owner made it public on September 26; GitHub visibility was verified. |
 | Root manifest and working QML entry | `io.github.rblalock.omarchy-replay`, version 0.1.0, with a native bar widget and keyboard-driven quick actions. |
 | Installation/removal documentation | Standalone payload, transactional setup/update and history-preserving uninstall implemented; see [installation](installation.md). |
-| Dependencies | Source dependencies documented, including Qt's Wayland plugin. Minimum supported system versions need clean-machine proof. |
+| Dependencies | Source dependencies documented, including Qt's Wayland plugin. The owner confirmed the installation check; tested versions are recorded below, not claimed as universal minimums. |
 | Local validation | All 44 current suites passed during the meeting-integration work. A fresh committed-source build, runtime verification and eight package tests passed on September 25. Earlier Arch container results are retained below. No GitHub Actions workflow is used. |
 | Preview | Optional; use fictional history, never personal captures. |
-| Submission | Draft prepared, not filed. Final commit validation and the owner's checklist confirmations remain. |
+| Submission | Body finalized and submission authorized by the owner. Automated validation and marketplace maintainer approval are separate from publishing a GitHub release. |
 
 Implemented listing identity: `io.github.rblalock.omarchy-replay`, category **Productivity**, tags **hyprland**, **system**. No collision was found in the current registry, including retired IDs; recheck before submission. Do not tag agent features as shipped while recall integration remains planned.
 
@@ -71,7 +71,7 @@ Acceptance:
 
 The source build uses Qt, Wayland capture protocols, Tesseract, SQLite, WebP, Python and systemd user services. A running development machine can hide missing packages. Check Qt Wayland support, the Tesseract CLI and English data, Python 3.11 or newer, Lua window rules and the required capture protocols. FFmpeg remains needed for legacy video history and experimental paths.
 
-The owner reported successful laptop use on September 25. Its exact install, lifecycle and removal coverage has not yet been confirmed; do not count that report as a full install/update/remove rehearsal. Record which of the actual install/open/configure/record/search/update/remove steps were exercised, then cover remaining paths in an isolated Omarchy test installation. Use fictional screen content for shareable evidence. Cover display selection, OCR highlights and region copy, lock/unlock, screensaver, suspend/resume, display disconnect and recovery. Exercise both strict privacy masks and Replay-only skips; verify incoming meeting content without weakening local privacy rules.
+The owner reported successful laptop use on September 25 and confirmed the requested installation check on September 26. That is owner-reported acceptance, separate from the automated fixtures below. For future release rehearsals, use fictional content and cover install/open/configure/record/search/update/remove, display selection, OCR highlights and region copy, lock/unlock, screensaver, suspend/resume, display disconnect and recovery. Exercise both strict privacy masks and Replay-only skips; verify incoming meeting content without weakening local privacy rules.
 
 Measure retained coverage, pending age, CPU, memory, storage growth and foreground responsiveness together. Passing headless tests does not establish capture safety or long-session performance on another machine.
 
@@ -83,7 +83,7 @@ After packaging and installation tests pass, record one release version and exac
 
 The owner chose local validation to avoid GitHub Actions costs. This repository has no Actions workflow; hosted CI is not a release gate. The marketplace's own submission validation and maintainer review remain separate requirements.
 
-Prepare the marketplace issue with the prescribed headings, category, tags and checklist. Include the manual setup requirement, native dependencies, background service, compositor changes, local-data behavior and uninstall path in maintainer notes. Review the complete issue with the owner before submission. Making the repository public, publishing the release and submitting the issue have not been performed by this readiness task.
+Prepare the marketplace issue with the prescribed headings, category, tags and checklist. Include the manual setup requirement, native dependencies, background service, compositor changes, local-data behavior and uninstall path in maintainer notes. The owner authorized release publication and submission on September 26; repository visibility was already public. Record and verify the resulting release and issue URLs when those operations complete.
 
 ## Earlier verification
 
@@ -94,7 +94,7 @@ Prepare the marketplace issue with the prescribed headings, category, tags and c
 - The local test environment used Omarchy 4.0.4, Hyprland 0.56.2, Qt 6.11.2, Tesseract 5.5.3, Python 3.14.7 and wayland-protocols 1.49. These are tested versions, not established minimum requirements.
 - A pinned Arch container image and the documented dependency list built successfully with no host mounts. The first full container run passed 31 suites, skipped the two native user-service suites and exposed an overly strict viewer-test assertion: translating a fitted selection can change its outward-rounded source crop by one pixel. The test now permits that rounding and requires exact reverse/forward round trips; OCR crop behavior is unchanged. The focused viewer suite then passed on the host (18.58 seconds) and a fresh pinned container (19.89 seconds), resolving all 32 container-enabled suites. Both temporary containers were removed. This validates the build/test commands locally, not an installed Omarchy plugin.
 
-Next work: confirm laptop coverage, finish any untested installed lifecycle paths, then validate the final publication commit. These steps precede the planned agent recall interface. The current implementation and user commands are documented in [installation](installation.md).
+For each release, validate its final source commit and keep native acceptance distinct from automated checks and marketplace approval. Agent recall remains the next product milestone. Current user commands are documented in [installation](installation.md).
 
 ### Runtime and plugin verification — 2026-09-24
 

@@ -13,7 +13,7 @@ Start with the [repository README](../README.md) for features, installation and 
 - [Roadmap](roadmap.md): implemented behavior, ordinary-use validation and future work.
 - [Release readiness](release-readiness.md): marketplace requirements, installation blockers, acceptance checks and publication steps.
 - [Weekend release runbook](release-weekend.md): exact-commit local validation, package proof and publication handoff.
-- [0.1.0 release notes](releases/0.1.0.md) and [marketplace submission draft](marketplace-submission.md): prepared copy for the first release; not yet published.
+- [0.1.0 release notes](releases/0.1.0.md) and [marketplace submission](marketplace-submission.md): features, limits and installation details for the first release.
 - [Shared recorder implementation record](background-recording-implementation.md): the dated verification report for shared history, service controls, retention and capture policy.
 
 The current setup uses `omarchy-replay` for configuration, data, state and the user service. Older reports retain the names and defaults used for their experiments. Use the current guides for commands and configuration; use the reports below for their measured findings.

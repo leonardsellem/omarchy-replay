@@ -1,14 +1,14 @@
 # Omarchy Replay roadmap
 
-Updated 2026-09-25. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
+Updated 2026-09-26. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
 
-## Current priority: release readiness
+## Current priority: release and marketplace review
 
 The user selected MIT and requested preparation for the Omarchy marketplace. The root license and third-party notices are present. Validation runs locally, with no GitHub Actions workflow or hosted CI release gate. The [release plan](release-readiness.md) records the remaining requirements and verified gaps.
 
 Release items 1–3 are implemented: a standalone versioned native runtime with a file manifest, transactional installation/update and history-preserving uninstall, plus a real Omarchy bar widget. Its history icon opens quick actions for the viewer, Settings and recording. Setup is explicit and fresh installation leaves recording off. Omarchy’s plugin manager has no native lifecycle hooks, so updating or removing the native app remains a documented step. See [installation](installation.md).
 
-The owner reports successful laptop use. Confirm its exact coverage and finish any untested install/update/removal or lifecycle paths, then review the final outgoing commit and history. A fresh committed-source build, package verification and current marketplace baseline checks passed locally. Version 0.1.0 [release notes](releases/0.1.0.md), a [weekend runbook](release-weekend.md) and a [marketplace submission draft](marketplace-submission.md) are prepared. The repository remains private; publication and marketplace approval are pending. Agent-assisted recall remains the next product feature after this release work.
+The owner reports successful laptop use, confirmed the installation check and made the repository public. Version 0.1.0 publication and marketplace submission are authorized. The [release notes](releases/0.1.0.md), [weekend runbook](release-weekend.md) and [submission body](marketplace-submission.md) document the release. Check the [release page](https://github.com/rblalock/omarchy-replay/releases/tag/v0.1.0) for publication; marketplace approval remains a separate maintainer decision. Agent-assisted recall remains the next product feature after this release work.
 
 ## Milestones 1–5: implemented locally
 

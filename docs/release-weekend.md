@@ -1,8 +1,8 @@
 # Weekend release runbook
 
-Prepare and verify version **0.1.0** locally. Publication starts only at the owner's go-time in step 5. GitHub Actions stays disabled; all Replay builds and tests run locally.
+Prepare and verify version **0.1.0** locally. The owner made the repository public, confirmed the installation check and authorized release publication and marketplace submission on September 26. GitHub Actions stays disabled; all Replay builds and tests run locally.
 
-The owner's report that Replay works well on the laptop is ordinary-use feedback. It does not by itself verify lock/sleep recovery, updates, removal or a clean installation. Record those checks individually rather than filling gaps by inference. [Release readiness](release-readiness.md) tracks the evidence; the [release notes](releases/0.1.0.md) and [marketplace submission](marketplace-submission.md) are drafts for review.
+The installation check is owner-reported acceptance. Automated tests and marketplace approval remain separate evidence. [Release readiness](release-readiness.md) tracks the distinction; the [release notes](releases/0.1.0.md) and [marketplace submission](marketplace-submission.md) contain the final publication copy.
 
 ## 1. Choose the candidate
 
@@ -81,15 +81,15 @@ Review file contents as well as names. Check locally for credentials, private pa
 
 Record one final checklist: commit SHA, versions, local test results/skips, manifest validation, payload verification, native checks completed, remaining limitations and publication review outcome.
 
-## 5. Stop for the owner's go-time
+## 5. Publish and submit
 
-Preparation ends with the reviewed candidate, release-note body and [marketplace issue draft](marketplace-submission.md). At the owner's go-time:
+Using the reviewed candidate, release-note body and [marketplace issue body](marketplace-submission.md):
 
 1. Push the reviewed commit if needed and verify the remote SHA.
 2. Make the repository public. Recheck the exact snapshot that becomes visible.
 3. Repeat the marketplace checks below against public remote HEAD and verify its full SHA before proceeding.
 4. If publishing a GitHub release, create the agreed tag at that SHA; `v0.1.0` is the proposed tag name. Use the reviewed release-note body without its draft-status line. A tag/release is useful, but separate from marketplace listing requirements.
-5. Submit the owner-reviewed marketplace issue titled **[Plugin]: Omarchy Replay** using the [draft body](marketplace-submission.md). Preserve all six headings and five checklist statements. Its unchecked boxes are deliberate: check them only after the repository is public and the owner confirms the remaining statements. Maintainer approval must cover the exact commit; a later code change requires renewed validation.
+5. Submit the authorized marketplace issue titled **[Plugin]: Omarchy Replay** using the [issue body](marketplace-submission.md). Preserve all six headings and five confirmed checklist statements. Maintainer approval must cover the exact commit; a later code change requires renewed validation.
 
 At release time, update the README's pending-release wording and remove the release notes' draft-status line before freezing the final commit. Keep marketplace status pending until the listing is accepted. Freeze the submitted branch during review: the submission validator and plugin installer resolve its current remote HEAD, so a release tag alone does not pin installations.
 

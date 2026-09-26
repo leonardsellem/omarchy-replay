@@ -637,3 +637,9 @@ The owner reports that Replay is working well on their laptop and intends to rel
 A fresh clean-source build and standalone package checks passed for application commit `74bc91df44b8c677b2c99e15615d3ede15ed4c57`. The current marketplace baseline found no findings and requested review for documented installation/service capabilities. These are local checks, not marketplace acceptance; the final release commit needs its own recorded validation. The laptop report adds real usage evidence without establishing unreported install/update/removal or hardware lifecycle coverage. See [release readiness](release-readiness.md) for exact evidence and limits.
 
 Publication, repository visibility and marketplace submission remain pending. Agent-assisted retrieval is still the next product milestone; no new feature work or changes to the running personal recorder were needed for this preparation.
+
+## 2026-09-26 — Release authorization
+
+The owner made the repository public, confirmed the installation check and requested the 0.1.0 tag, release notes and marketplace submission. Publish the existing feature set as `v0.1.0`, with local validation and GitHub Actions disabled. The launch preview links to the owner's YouTube video; the MP4 is no longer in the current source tree. Release notes distinguish screen OCR, optional completed-meeting recall and the planned agent retrieval interface.
+
+The [release runbook](release-weekend.md) and [marketplace body](marketplace-submission.md) record the publication path and explicit native setup/removal. Public release and submission do not establish marketplace approval. Keep the submitted source commit stable while maintainers review it, and leave the personal recorder and its data unchanged during release verification.
