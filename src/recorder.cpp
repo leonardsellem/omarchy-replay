@@ -30,6 +30,7 @@
 #include <webp/decode.h>
 #include <algorithm>
 #include <cerrno>
+#include <csignal>
 #include <cmath>
 #include <ctime>
 #include <limits>
@@ -1346,6 +1347,13 @@ struct Recorder::Impl : OcrEngine {
         encoderErrors.clear();
         encoder.setStandardOutputFile(QProcess::nullDevice());
         encoder.setChildProcessModifier([outputLimit] {
+            // Ignoring SIGXFSZ must survive exec: -fs overshoots while the mux
+            // thread writes ahead, so the kernel rlimit fires first and would
+            // otherwise kill ffmpeg on signal 25 with a core dump. With it
+            // ignored, write() returns EFBIG and ffmpeg exits cleanly.
+            ::signal(SIGXFSZ, SIG_IGN);
+            const rlimit noCore{0, 0};
+            setrlimit(RLIMIT_CORE, &noCore);
             const rlimit limit{rlim_t(outputLimit), rlim_t(outputLimit)};
             if (setrlimit(RLIMIT_FSIZE, &limit) != 0) _exit(126);
         });
