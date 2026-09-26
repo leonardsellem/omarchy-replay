@@ -1295,6 +1295,13 @@ struct Recorder::Impl : OcrEngine {
         if (encoderErrors.size() > 8192) encoderErrors = encoderErrors.right(8192);
     }
 
+    // Meaningful only once the encoder is no longer running; distinguishes a
+    // clean exit (for example EFBIG at the -fs limit) from a signal kill.
+    QString encoderExitDetail() const {
+        return QString(" (exit code %1, %2)").arg(encoder.exitCode())
+            .arg(encoder.exitStatus() == QProcess::NormalExit ? "normal exit" : "crashed by signal");
+    }
+
     void startSegment(int width, int height, qint64 timestampMs) {
         const quint64 queueReserve = options.deferredOcr ? options.maxPendingBytes : 0;
         segmentWidth = width; segmentHeight = height; segmentStartMs = timestampMs; segmentCount = 0;
@@ -1354,23 +1361,31 @@ struct Recorder::Impl : OcrEngine {
             while (remaining > 0) {
                 drainErrors();
                 if (encoder.state() != QProcess::Running || deadline.elapsed() > ProcessTimeoutMs)
-                    error("Recording stopped: encoder exited or exceeded 30 seconds: " + QString::fromUtf8(encoderErrors));
+                    error("Recording stopped: encoder exited or exceeded 30 seconds"
+                          + (encoder.state() == QProcess::NotRunning ? encoderExitDetail() : QString())
+                          + ": " + QString::fromUtf8(encoderErrors));
                 const qint64 length = std::min<qint64>(remaining, 65536);
                 const qint64 written = encoder.write(data, length);
-                if (written < 0) error("Recording stopped: encoder input failed");
+                if (written < 0)
+                    error("Recording stopped: encoder input failed"
+                          + (encoder.state() == QProcess::NotRunning ? encoderExitDetail() : QString()));
                 data += written; remaining -= written;
                 while (encoder.bytesToWrite() > 65536) {
                     encoder.waitForBytesWritten(100);
                     drainErrors();
                     if (encoder.state() != QProcess::Running || deadline.elapsed() > ProcessTimeoutMs)
-                        error("Recording stopped: encoder input stalled: " + QString::fromUtf8(encoderErrors));
+                        error("Recording stopped: encoder input stalled"
+                              + (encoder.state() == QProcess::NotRunning ? encoderExitDetail() : QString())
+                              + ": " + QString::fromUtf8(encoderErrors));
                 }
             }
         }
         while (encoder.bytesToWrite() > 0) {
             encoder.waitForBytesWritten(100); drainErrors();
             if (encoder.state() != QProcess::Running || deadline.elapsed() > ProcessTimeoutMs)
-                error("Recording stopped: encoder did not consume frame: " + QString::fromUtf8(encoderErrors));
+                error("Recording stopped: encoder did not consume frame"
+                      + (encoder.state() == QProcess::NotRunning ? encoderExitDetail() : QString())
+                      + ": " + QString::fromUtf8(encoderErrors));
         }
     }
 
@@ -1383,7 +1398,8 @@ struct Recorder::Impl : OcrEngine {
         }
         drainErrors();
         if (encoder.exitStatus() != QProcess::NormalExit || encoder.exitCode() != 0)
-            error("Recording stopped: encoder failed; last segment is marked incomplete: " + QString::fromUtf8(encoderErrors));
+            error("Recording stopped: encoder failed; last segment is marked incomplete" + encoderExitDetail()
+                  + ": " + QString::fromUtf8(encoderErrors));
         // FFmpeg's file-size ceiling can produce exit 0 with fewer frames. Never
         // advertise those observations as retrievable without checking the count.
         QProcess probe;
