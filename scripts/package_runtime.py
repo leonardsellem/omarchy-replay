@@ -20,6 +20,7 @@ PAYLOAD = {
     'bin/replay': 0o755,
     'scripts/replay': 0o755,
     'scripts/open_replay.py': 0o644,
+    'scripts/replay_mcp.py': 0o644,
     'scripts/viewer_launch.py': 0o644,
     'scripts/runtime_layout.py': 0o644,
     'scripts/package_runtime.py': 0o644,
