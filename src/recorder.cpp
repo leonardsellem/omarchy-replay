@@ -2558,15 +2558,17 @@ SearchPage searchFramePage(const QString &directory, const QString &text, int li
         const QByteArray sql = frameColumns(db) +
             "JOIN frame_text ON frame_text.rowid=f.id WHERE frame_text MATCH ?" + timeFilter.toUtf8() +
             (rank ? " ORDER BY rank,f.timestamp_ms,f.id" : " ORDER BY f.timestamp_ms,f.id") + " LIMIT ? OFFSET ?";
-        Statement rows(db, sql.constData()); rows.bind(1, expression); bindTime(rows, 2);
-        rows.bind(3, pageSize); rows.bind(4, result.offset);
+        Statement rows(db, sql.constData()); rows.bind(1, expression);
+        const int rowColumn = bindTime(rows, 2);
+        rows.bind(rowColumn, pageSize); rows.bind(rowColumn + 1, result.offset);
         result.frames = readRows(rows);
     }
     const int markerLimit = std::clamp(timelineLimit, 2, 2048);
     if (result.totalMatches <= markerLimit) {
         Statement markers(db, "SELECT f.id,f.timestamp_ms FROM frames f JOIN frame_text ON frame_text.rowid=f.id "
             "WHERE frame_text MATCH ?" + timeFilter.toUtf8() + " ORDER BY f.timestamp_ms,f.id LIMIT ?");
-        markers.bind(1, expression); bindTime(markers, 2); markers.bind(3, markerLimit);
+        markers.bind(1, expression);
+        markers.bind(bindTime(markers, 2), markerLimit);
         while (markers.next()) result.timeline.points.append({markers.number(0), markers.number(1), "ready"});
     } else {
         // Aggregate inside SQLite rather than materializing every match or
