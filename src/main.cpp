@@ -544,8 +544,9 @@ int main(int argc, char **argv) {
                         {"original_path", frame->originalPath},
                         {"lines", replay::frameTextLines(directory, frameId)}}},
                     {"neighbors", frameJson(replay::framesNear(directory, frameId, integer(p, "context-seconds", 0, 300)))}};
+                const bool extractRequested = p.isSet("out");
                 const auto target = p.value("out");
-                if (!target.isEmpty()) {
+                if (extractRequested) {
                     if (QFile::exists(target)) throw std::runtime_error("Extraction destination already exists");
                     QDir().mkpath(QFileInfo(target).absolutePath());
                     if (!replay::loadFrame(directory, frameId).save(target)) throw std::runtime_error("Could not save extracted frame");

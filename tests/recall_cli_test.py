@@ -21,8 +21,10 @@ def run(*args, ok=True):
 
 
 def main():
-    started = datetime.now(timezone.utc)
     with tempfile.TemporaryDirectory(prefix='replay-recall-') as temporary:
+        # Keep any stray relative output inside the test sandbox.
+        os.chdir(temporary)
+        started = datetime.now(timezone.utc)
         dataset = Path(temporary) / 'archive'
         # Fictional synthetic workload only; no real screen content is involved.
         run('demo', '--dir', str(dataset), '--frames', '8', '--interval', '.25',
@@ -71,6 +73,8 @@ def main():
         neighbor_ids = {n['id'] for n in moment['neighbors']}
         assert first['id'] not in neighbor_ids, moment['neighbors']
         assert len(moment['neighbors']) >= 1, moment['neighbors']
+        # --out is opt-in; the parser default must not trigger extraction.
+        assert not Path('runs/extracted.png').exists(), 'moment fetch wrote the default extraction file'
 
         target = Path(temporary) / 'evidence.png'
         run('recall', '--dir', str(dataset), '--id', str(first['id']), '--out', str(target))
