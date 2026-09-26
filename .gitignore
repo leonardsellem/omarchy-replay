@@ -44,6 +44,5 @@ secrets.json
 *.onnx
 *.traineddata
 
-# Reviewed launch assets; private captures remain ignored.
-!/docs/assets/omarchy-replay-launch.mp4
+# Reviewed launch thumbnail; private captures remain ignored.
 !/docs/assets/omarchy-replay-launch.jpg

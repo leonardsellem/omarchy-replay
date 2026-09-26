@@ -1,8 +1,8 @@
 # Omarchy Replay
 
-[![Watch the Omarchy Replay launch video](docs/assets/omarchy-replay-launch.jpg)](docs/assets/omarchy-replay-launch.mp4)
+[![Watch the Omarchy Replay launch video](docs/assets/omarchy-replay-launch.jpg)](https://youtu.be/F9FaIxpPdvo)
 
-[Watch the 15-second launch video](docs/assets/omarchy-replay-launch.mp4)
+[Watch the 15-second launch video on YouTube](https://youtu.be/F9FaIxpPdvo)
 
 Find things you saw on your screen. Omarchy Replay records one selected display, recognizes its text locally, and gives you a searchable timeline of the original images.
 
