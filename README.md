@@ -1,5 +1,9 @@
 # Omarchy Replay
 
+[![Watch the Omarchy Replay launch video](docs/assets/omarchy-replay-launch.jpg)](docs/assets/omarchy-replay-launch.mp4)
+
+[Watch the 15-second launch video](docs/assets/omarchy-replay-launch.mp4)
+
 Find things you saw on your screen. Omarchy Replay records one selected display, recognizes its text locally, and gives you a searchable timeline of the original images.
 
 - Search visible text, including partial words as you type.
@@ -13,17 +17,9 @@ Find things you saw on your screen. Omarchy Replay records one selected display,
 - Exclude apps and windows, with password-manager defaults and optional gaming/media presets.
 - Configure and diagnose Replay with your installed coding agent using copyable prompts.
 
-**Early software for Omarchy and Hyprland.** Recording is off after a fresh installation. Long-session performance and hardware lifecycle behavior still need everyday testing.
-
-## Open and configure
-
-Click the history icon in the top bar for **Open history**, **Settings** and recording controls. You can also open **Omarchy Replay** from your app launcher or use **Super+Alt+R**. Press **Esc** to leave search, then **I → Settings** to choose a display and review storage. Choose **Start recording** when ready. Closing the viewer leaves recording and indexing unchanged.
-
-Replay installs its native runtime outside the plugin folder. You do not need a development checkout to use it or ask your coding agent to configure it. The launcher is `~/.local/bin/omarchy-replay`; configuration and history survive an app update.
-
 ## Install the plugin
 
-Marketplace submission and public release are still pending. For a repository installation on a supported Omarchy system, install the [dependencies](#source-installation-and-development), then:
+For a repository installation on a supported Omarchy system, install the [dependencies](#source-installation-and-development), then:
 
 ```bash
 omarchy plugin add https://github.com/rblalock/omarchy-replay.git --enable
@@ -34,6 +30,13 @@ Click Replay’s history icon in the bar and choose **Set up Replay**. Setup ope
 If **Super+Alt+R** is already used, setup stops before changing your installation. Run the plugin’s `scripts/plugin_control.py setup-run` from a terminal after resolving the conflict, or follow the source install command with `--no-shortcut`.
 
 After `omarchy plugin update io.github.rblalock.omarchy-replay`, use the bar’s **Update Replay** action when available. Updating the shell plugin alone does not replace the native app. See [installation and removal](docs/installation.md) for the exact paths, manual update command and recovery behavior.
+
+
+## After Install
+Click the history icon in the top bar for **Open history**, **Settings** and recording controls. You can also open **Omarchy Replay** from your app launcher or use **Super+Alt+R**. Press **Esc** to leave search, then **I → Settings** to choose a display and review storage. Choose **Start recording** when ready. Closing the viewer leaves recording and indexing unchanged.
+
+Replay installs its native runtime outside the plugin folder. You do not need a development checkout to use it or ask your coding agent to configure it. The launcher is `~/.local/bin/omarchy-replay`; configuration and history survive an app update.
+
 
 ## Keyboard controls
 
@@ -201,9 +204,7 @@ REPLAY_TEST_RESOURCE_SCOPE=1 ctest --test-dir build --output-on-failure
 
 Tests use fictional history. Keep recordings, OCR text, logs, credentials and generated output out of Git. Review diagnostics before sharing them.
 
-## Release status and removal
-
-The plugin manifest, versioned runtime, transactional installer and native uninstaller are implemented. The [release plan](docs/release-readiness.md) tracks verification and remaining clean-machine/publication work. The repository has not been made public or submitted to the marketplace.
+## Uninstall
 
 Close Replay’s viewer windows, then remove the native app **before** removing the shell plugin:
 

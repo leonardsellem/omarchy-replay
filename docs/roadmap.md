@@ -1,6 +1,6 @@
 # Omarchy Replay roadmap
 
-Updated 2026-09-24. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
+Updated 2026-09-25. This records implemented behavior, remaining validation and the agreed product boundary. Start with [background recording](background-recording.md) for the current user path. Earlier `runs/trials/` recordings remain separate and available explicitly.
 
 ## Current priority: release readiness
 
@@ -8,7 +8,7 @@ The user selected MIT and requested preparation for the Omarchy marketplace. The
 
 Release items 1–3 are implemented: a standalone versioned native runtime with a file manifest, transactional installation/update and history-preserving uninstall, plus a real Omarchy bar widget. Its history icon opens quick actions for the viewer, Settings and recording. Setup is explicit and fresh installation leaves recording off. Omarchy’s plugin manager has no native lifecycle hooks, so updating or removing the native app remains a documented step. See [installation](installation.md).
 
-Validate the complete installed workflow on a separate Omarchy machine/session, review the final outgoing commit and history, and prepare an exact-commit submission. The repository remains private. Publication, visibility changes and marketplace submission are separate steps. Agent-assisted recall remains the next product feature after this release work.
+The owner reports successful laptop use. Confirm its exact coverage and finish any untested install/update/removal or lifecycle paths, then review the final outgoing commit and history. A fresh committed-source build, package verification and current marketplace baseline checks passed locally. Version 0.1.0 [release notes](releases/0.1.0.md), a [weekend runbook](release-weekend.md) and a [marketplace submission draft](marketplace-submission.md) are prepared. The repository remains private; publication and marketplace approval are pending. Agent-assisted recall remains the next product feature after this release work.
 
 ## Milestones 1–5: implemented locally
 

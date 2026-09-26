@@ -43,3 +43,7 @@ secrets.json
 *.mp3
 *.onnx
 *.traineddata
+
+# Reviewed launch assets; private captures remain ignored.
+!/docs/assets/omarchy-replay-launch.mp4
+!/docs/assets/omarchy-replay-launch.jpg

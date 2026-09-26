@@ -1,6 +1,8 @@
 # Release readiness
 
-Reviewed 2026-09-24. The native runtime, transactional installer/uninstaller and top-bar plugin are implemented. Replay is **not yet submitted to the Omarchy marketplace**; clean-machine installation proof and publication review remain. This document separates current evidence from work still required.
+Reviewed 2026-09-25. Version **0.1.0** is being prepared for the first public release. The owner reports successful laptop use, adding a second-machine result to the desktop testing. The repository is still private and **not submitted to the Omarchy marketplace**. The exact laptop checks, final publication snapshot and marketplace review remain to be recorded.
+
+Use the [weekend runbook](release-weekend.md), [draft release notes](releases/0.1.0.md) and [marketplace issue draft](marketplace-submission.md) for the remaining steps. This document separates current evidence from unverified paths.
 
 ## Marketplace requirements
 
@@ -15,9 +17,9 @@ Listings are validated against an exact commit. The [security baseline](https://
 | Root manifest and working QML entry | `io.github.rblalock.omarchy-replay`, version 0.1.0, with a native bar widget and keyboard-driven quick actions. |
 | Installation/removal documentation | Standalone payload, transactional setup/update and history-preserving uninstall implemented; see [installation](installation.md). |
 | Dependencies | Source dependencies documented, including Qt's Wayland plugin. Minimum supported system versions need clean-machine proof. |
-| Local validation | Native, Python and plugin checks run locally. Earlier Arch container results are retained below. No GitHub Actions workflow is used. |
+| Local validation | All 44 current suites passed during the meeting-integration work. A fresh committed-source build, runtime verification and eight package tests passed on September 25. Earlier Arch container results are retained below. No GitHub Actions workflow is used. |
 | Preview | Optional; use fictional history, never personal captures. |
-| Submission | Not filed. Complete local release work before preparing the final commit and owner-reviewed issue. |
+| Submission | Draft prepared, not filed. Final commit validation and the owner's checklist confirmations remain. |
 
 Implemented listing identity: `io.github.rblalock.omarchy-replay`, category **Productivity**, tags **hyprland**, **system**. No collision was found in the current registry, including retired IDs; recheck before submission. Do not tag agent features as shipped while recall integration remains planned.
 
@@ -69,7 +71,7 @@ Acceptance:
 
 The source build uses Qt, Wayland capture protocols, Tesseract, SQLite, WebP, Python and systemd user services. A running development machine can hide missing packages. Check Qt Wayland support, the Tesseract CLI and English data, Python 3.11 or newer, Lua window rules and the required capture protocols. FFmpeg remains needed for legacy video history and experimental paths.
 
-Run the actual install/open/configure/record/search/update/remove sequence in a separate Omarchy VM or test machine. Use fictional screen content for shareable evidence. Cover display selection, OCR highlights and region copy, lock/unlock, screensaver, suspend/resume, display disconnect and recovery. Exercise both strict privacy masks and Replay-only skips; verify incoming meeting content without weakening local privacy rules.
+The owner reported successful laptop use on September 25. Its exact install, lifecycle and removal coverage has not yet been confirmed; do not count that report as a full install/update/remove rehearsal. Record which of the actual install/open/configure/record/search/update/remove steps were exercised, then cover remaining paths in an isolated Omarchy test installation. Use fictional screen content for shareable evidence. Cover display selection, OCR highlights and region copy, lock/unlock, screensaver, suspend/resume, display disconnect and recovery. Exercise both strict privacy masks and Replay-only skips; verify incoming meeting content without weakening local privacy rules.
 
 Measure retained coverage, pending age, CPU, memory, storage growth and foreground responsiveness together. Passing headless tests does not establish capture safety or long-session performance on another machine.
 
@@ -83,7 +85,7 @@ The owner chose local validation to avoid GitHub Actions costs. This repository 
 
 Prepare the marketplace issue with the prescribed headings, category, tags and checklist. Include the manual setup requirement, native dependencies, background service, compositor changes, local-data behavior and uninstall path in maintainer notes. Review the complete issue with the owner before submission. Making the repository public, publishing the release and submitting the issue have not been performed by this readiness task.
 
-## Evidence from this review
+## Earlier verification
 
 - Audited all seven reachable commits and 229 historical blobs for captured-media/runtime file extensions, local user paths and several credential formats. No matches were found; author metadata uses GitHub's noreply address. This is limited pattern screening, not a complete secrets audit, and must be repeated on the final outgoing snapshot.
 - Twenty-six isolated installer tests cover first setup, update with preserved recording/indexing choices and actual service enablement, restart/reload failures, concurrent edits, managed-only removal, symlink/path conflicts and customized shortcut preservation. Package tests run a real copied native binary after deleting the synthetic source checkout.
@@ -92,7 +94,7 @@ Prepare the marketplace issue with the prescribed headings, category, tags and c
 - The local test environment used Omarchy 4.0.4, Hyprland 0.56.2, Qt 6.11.2, Tesseract 5.5.3, Python 3.14.7 and wayland-protocols 1.49. These are tested versions, not established minimum requirements.
 - A pinned Arch container image and the documented dependency list built successfully with no host mounts. The first full container run passed 31 suites, skipped the two native user-service suites and exposed an overly strict viewer-test assertion: translating a fitted selection can change its outward-rounded source crop by one pixel. The test now permits that rounding and requires exact reverse/forward round trips; OCR crop behavior is unchanged. The focused viewer suite then passed on the host (18.58 seconds) and a fresh pinned container (19.89 seconds), resolving all 32 container-enabled suites. Both temporary containers were removed. This validates the build/test commands locally, not an installed Omarchy plugin.
 
-Next work: clean-machine proof, then final publication review. These steps precede the planned agent recall interface. The current implementation and user commands are documented in [installation](installation.md).
+Next work: confirm laptop coverage, finish any untested installed lifecycle paths, then validate the final publication commit. These steps precede the planned agent recall interface. The current implementation and user commands are documented in [installation](installation.md).
 
 ### Runtime and plugin verification — 2026-09-24
 
@@ -102,3 +104,17 @@ Next work: clean-machine proof, then final publication review. These steps prece
 - The host installation is a local preview of uncommitted source, not a published release or marketplace acceptance. Full clean-machine install/record/update/remove and hardware lifecycle checks remain in step 4. No remote release, visibility change or marketplace submission was performed.
 
 The bridge’s status path was sampled ten times on the development host: approximately 52 ms wall time and 40 ms child CPU per invocation, or 0.40% of one CPU at a ten-second interval per widget instance. This is a short process-cost sample, not a whole-system power measurement or a long-session benchmark. No continuous resource monitor was added.
+
+### Weekend preparation — 2026-09-25
+
+The application snapshot checked was `74bc91df44b8c677b2c99e15615d3ede15ed4c57` (the completed-meeting integration). Release documentation prepared afterward is not part of that SHA; record and validate the final release commit before publication.
+
+- A fresh Git clone of that commit built the Release application with two compiler jobs and no development build artifacts. Its standalone payload passed hash/mode verification and all eight package tests. The manifest reports version `0.1.0`, the expected source revision and `source_dirty: false`. This is local packaging proof, not a portable binary release.
+- Clean-source `omarchy plugin validate` passed. Validate a clean snapshot: the development directory's ignored experiments contain symlinks that the plugin validator correctly rejects.
+- The current marketplace validator and scanner were inspected at `d9be5323b5054fbce8b84b2023de25936621f6c6`. Local exact-Git-blob checks passed its community manifest rules and found no ID collision across 4,178 current catalog entries. The baseline returned **zero findings**, `review-required`, and `blocksApproval: false`.
+- Expected capability review covers `installer`, `service-management`, `privilege`, `package-manager` and `remote-build`. The package/privilege flags identify the documented user-run dependency command; Replay setup builds its own source and does not install packages automatically. These capabilities need disclosure and maintainer review, not removal to avoid scanning.
+- The local scanner adapter did not test public repository reachability. After publication, run the upstream submission validator and scanner against remote HEAD, compare its recorded commit to the intended release SHA, and obtain the marketplace's `approved-and-verified` decision. Local success is not listing approval.
+- Laptop use is user-reported successful; no exact hardware, lifecycle, performance or removal claims are inferred. This preparation did not restart the personal recorder, inspect private captures or change installed settings.
+- Publication screening covered ten commits reachable from the checked application SHA, all 314 historical text blobs and 180 current source/documentation files, including the new release drafts. No checked private-path, runtime-media/database, credential or author-email patterns matched. Author and committer emails use GitHub noreply. This bounded screening is not a complete secrets audit; repeat the final snapshot review before changing visibility. GitHub read-back confirmed Actions disabled and the repository private.
+
+Build, package and scanner evidence stays under ignored `runs/release-0.1.0-20260925/` and `runs/release-marketplace-preflight-20260925/`.

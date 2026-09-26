@@ -4,12 +4,16 @@ Start with the [repository README](../README.md) for features, installation and 
 
 ## Current guides
 
+- [Installation, updates and removal](installation.md): native payload layout, manual setup, rollback and preserved data.
 - [Recording and configuration](background-recording.md): display selection, storage, CPU settings, exclusions, keyboard controls and service diagnostics.
+- [Optional meeting recall](meetings.md): completed transcript import, grouped search, timeline anchors and the external recorder.
 - [App exclusion presets](exclusion-presets.md): privacy defaults, optional gaming/media lists and verified window identifiers.
 - [Coding agent guide](agent-guide.md): supported CLI commands, drop-in operation context, configuration edits, resource tuning and evidence retrieval.
 - [Architecture](architecture.md): process model, archives, OCR/search, CPU scheduling, retention, lifecycle, exclusions and recovery.
 - [Roadmap](roadmap.md): implemented behavior, ordinary-use validation and future work.
 - [Release readiness](release-readiness.md): marketplace requirements, installation blockers, acceptance checks and publication steps.
+- [Weekend release runbook](release-weekend.md): exact-commit local validation, package proof and publication handoff.
+- [0.1.0 release notes](releases/0.1.0.md) and [marketplace submission draft](marketplace-submission.md): prepared copy for the first release; not yet published.
 - [Shared recorder implementation record](background-recording-implementation.md): the dated verification report for shared history, service controls, retention and capture policy.
 
 The current setup uses `omarchy-replay` for configuration, data, state and the user service. Older reports retain the names and defaults used for their experiments. Use the current guides for commands and configuration; use the reports below for their measured findings.
@@ -49,5 +53,3 @@ The current setup uses `omarchy-replay` for configuration, data, state and the u
 - [Feasibility results](feasibility-results.md): measured codec, memory, CPU, OCR, and foreground findings, including unmet targets.
 - [Performance iteration 1](performance-iteration-1.md): incremental OCR, fewer pixel copies, allocator cleanup, and optional CPU pacing, with correctness and measured tradeoffs.
 - [Capture and indexing separation](capture-indexing-iteration.md): single-monitor recommendation, bounded deferred OCR, pending-image recall, and measured coverage/resource costs.
-
-- [Installation, updates and removal](installation.md): native payload layout, manual setup, rollback and preserved data.
