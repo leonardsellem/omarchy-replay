@@ -2,6 +2,8 @@
 
 Updated 2026-09-26. The repository is public. The owner confirmed the installation check and authorized publishing **0.1.0** and submitting it to the Omarchy marketplace. This closes the owner installation-check gate; it does not establish performance or lifecycle compatibility on every machine. Release publication and marketplace listing approval remain separate outcomes.
 
+Version [0.1.0](https://github.com/rblalock/omarchy-replay/releases/tag/v0.1.0) is published. [Marketplace submission #8839](https://github.com/omacom/omarchy-plugin-marketplace/issues/8839) passed automated validation; native recorder and installer review remains pending. The [maintainer's requested correction](https://github.com/omacom/omarchy-plugin-marketplace/issues/8839#issuecomment-5847663665) removes the root `AGENTS.md` from the current plugin tree, including its historical push-authorization statement. The ignore rules also exclude local `AGENTS.md` and `AGENTS.override.md` files. Existing user and development guides remain ordinary documentation, with no replacement automatically loaded instruction file. This changes no native runtime or installer behavior; the corrected source commit requires re-validation.
+
 Use the [weekend runbook](release-weekend.md), [release notes](releases/0.1.0.md) and [marketplace submission body](marketplace-submission.md). Check the [release page](https://github.com/rblalock/omarchy-replay/releases/tag/v0.1.0) for publication and the marketplace issue for listing approval. Earlier dated evidence below retains the state at each review.
 
 ## Marketplace requirements

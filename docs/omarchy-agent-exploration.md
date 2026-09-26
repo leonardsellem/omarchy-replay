@@ -643,3 +643,9 @@ Publication, repository visibility and marketplace submission remain pending. Ag
 The owner made the repository public, confirmed the installation check and requested the 0.1.0 tag, release notes and marketplace submission. Publish the existing feature set as `v0.1.0`, with local validation and GitHub Actions disabled. The launch preview links to the owner's YouTube video; the MP4 is no longer in the current source tree. Release notes distinguish screen OCR, optional completed-meeting recall and the planned agent retrieval interface.
 
 The [release runbook](release-weekend.md) and [marketplace body](marketplace-submission.md) record the publication path and explicit native setup/removal. Public release and submission do not establish marketplace approval. Keep the submitted source commit stable while maintainers review it, and leave the personal recorder and its data unchanged during release verification.
+
+## 2026-09-26 — Marketplace instruction-file correction
+
+The [marketplace maintainer](https://github.com/omacom/omarchy-plugin-marketplace/issues/8839#issuecomment-5847663665) identified the published root `AGENTS.md` as automatically consumed instructions inside the installed plugin checkout. The user requested the correction, push and issue update. The file is removed rather than renamed to another agent instruction filename; local `AGENTS.md` and `AGENTS.override.md` files are ignored. Product boundaries, architecture and user-facing commands remain in the existing ordinary documentation. The historical push-authorization statement is removed from the current source tree.
+
+The change requires marketplace re-validation at the new commit. Native recorder and installer review is still pending. The published v0.1.0 tag remains unchanged, and no recording, installed configuration or runtime code is changed by this correction.

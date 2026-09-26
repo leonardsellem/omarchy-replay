@@ -22,6 +22,10 @@ secrets.json
 *.pfx
 *.bundle
 
+# Local agent instructions are not distributed with the plugin checkout.
+AGENTS.md
+AGENTS.override.md
+
 # Runtime history and generated diagnostics, even outside runs/.
 *.db
 *.db-*
