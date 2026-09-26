@@ -29,6 +29,10 @@ class Server:
         assert line, f'server closed: {self.proc.stderr.read()}'
         return json.loads(line)
 
+    def notify(self, payload):
+        self.proc.stdin.write(json.dumps(payload) + '\n')
+        self.proc.stdin.flush()
+
 
 def main():
     with tempfile.TemporaryDirectory(prefix='replay-mcp-') as temporary:
@@ -45,7 +49,7 @@ def main():
         init = server.call({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
             'protocolVersion': '2024-11-05', 'capabilities': {}, 'clientInfo': {'name': 'test'}}})
         assert init['result']['serverInfo']['name'] == 'omarchy-replay-mcp', init
-        server.call({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
+        server.notify({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
         # A notification must not produce a response line; the next reply is tools/list.
         listing = server.call({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'})
         names = {tool['name'] for tool in listing['result']['tools']}
