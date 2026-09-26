@@ -559,8 +559,8 @@ int main(int argc, char **argv) {
                 {"source", source}, {"order", order}, {"limit", limit}, {"offset", qint64(offset)}};
             if (source != "meetings") {
                 // Prefix mode matches the viewer's final-token expansion; see searchFramePage.
-                const auto page = replay::searchFramePage(directory, query, limit, offset, SearchMode::PrefixLastToken,
-                    2, 0, sinceMs, untilMs, order == "rank" ? SearchOrder::Rank : SearchOrder::Chronological);
+                const auto page = replay::searchFramePage(directory, query, limit, offset, replay::SearchMode::PrefixLastToken,
+                    2, 0, sinceMs, untilMs, order == "rank" ? replay::SearchOrder::Rank : replay::SearchOrder::Chronological);
                 result["total_matches"] = page.totalMatches;
                 result["results"] = frameJson(page.frames);
             } else result["total_matches"] = 0;
