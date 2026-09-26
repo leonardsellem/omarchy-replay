@@ -58,7 +58,11 @@ replay::IndexerOptions options(const QString &directory) {
     replay::IndexerOptions result; result.directory = directory; result.ocrMode = "full"; result.ocrReuse = true;
     return result;
 }
-void ready(replay::Indexer &indexer) { require(indexer.processNext().state == "ready", "index synthetic frame"); }
+void ready(replay::Indexer &indexer) {
+    const auto result = indexer.processNext();
+    if (result.state != "ready")
+        throw std::runtime_error(QString("index synthetic frame: state=%1 error=%2").arg(result.state, result.error).toStdString());
+}
 qint64 count(const replay::Indexer &indexer, const char *key) { return indexer.statsJSON().value(key).toInteger(); }
 
 void returnsAndRestart(const QString &root) {
@@ -189,6 +193,39 @@ void publicationAndSourceGuard(const QString &root) {
     require(count(guarded, "ocr_reuse_hits") == 1, "changed source was not re-decoded on retry");
 }
 
+void configuredLanguages(const QString &root) {
+    const QString directory = root + "/languages";
+    QImage french(960, 540, QImage::Format_RGBA8888);
+    french.fill(Qt::white);
+    {
+        QPainter painter(&french);
+        QFont font("DejaVu Sans"); font.setPixelSize(36); painter.setFont(font); painter.setPen(Qt::black);
+        painter.drawText(40, 120, QString::fromUtf8("Résumé envoyé à 14h05"));
+        painter.drawText(40, 240, QString::fromUtf8("coordonnées vérifiées"));
+    }
+    record(directory, {french, frame(2), french, frame(2)});
+    auto frenchOpts = options(directory); frenchOpts.ocrLanguages = "eng+fra";
+    {
+        replay::Indexer indexer(frenchOpts);
+        ready(indexer); ready(indexer); ready(indexer);
+        require(count(indexer, "ocr_reuse_hits") == 1 && count(indexer, "ocr_full_frames") == 2,
+                "eng+fra reuse profile did not cache within its own language set");
+        const auto rows = replay::listFrames(directory);
+        require(rows[0].text.contains(QString::fromUtf8("sumé")),
+                "accented word was not indexed with eng+fra; install tesseract-data-fra");
+    }
+    // A different configured language set must not reuse the cached result:
+    // identical pixels were already OCR'd under eng+fra, so eng re-recognizes.
+    replay::Indexer english(options(directory));
+    ready(english);
+    require(count(english, "ocr_reuse_hits") == 0 && count(english, "ocr_full_frames") == 1,
+            "eng reused a cached eng+fra result");
+    auto invalid = options(directory); invalid.ocrLanguages = "eng fre";
+    bool rejected = false;
+    try { replay::Indexer bad(invalid); } catch (const std::exception &) { rejected = true; }
+    require(rejected, "invalid OCR language set was accepted");
+}
+
 void busyPublicationStaysPending(const QString &root) {
     const QString directory = root + "/busy";
     record(directory, {frame(1)});
@@ -229,6 +266,7 @@ int main(int argc, char **argv) {
         returnsAndRestart(temporary.path()); priorityAndProfile(temporary.path());
         exactPixelsAndPartialProvenance(temporary.path()); invalidationAndBound(temporary.path());
         publicationAndSourceGuard(temporary.path());
+        configuredLanguages(temporary.path());
         busyPublicationStaysPending(temporary.path());
         std::cout << "PASS exact whole-frame OCR reuse, durable provenance, invalidation and atomic publication\n";
         return 0;
