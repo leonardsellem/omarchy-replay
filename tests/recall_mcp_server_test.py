@@ -90,6 +90,13 @@ def main():
             'name': 'search', 'arguments': {'words': 'Patrick', 'limit': 1}}})
         assert after['result']['isError'] is False, after
 
+        # An option-looking search word must stay a literal positional query,
+        # never a CLI flag (`--` end-of-options marker in the adapter).
+        option_word = server.call({'jsonrpc': '2.0', 'id': 11, 'method': 'tools/call', 'params': {
+            'name': 'search', 'arguments': {'words': '--out'}}})
+        assert option_word['result']['isError'] is False, option_word
+        assert 'total_matches' in json.loads(option_word['result']['content'][0]['text']), option_word
+
         unknown_tool = server.call({'jsonrpc': '2.0', 'id': 9, 'method': 'tools/call', 'params': {
             'name': 'nope', 'arguments': {}}})
         assert unknown_tool['result']['isError'] is True, unknown_tool

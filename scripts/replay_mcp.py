@@ -159,7 +159,9 @@ def tool_call(name, arguments, binary, archive):
             argv.extend(['--order', order])
         if source:
             argv.extend(['--source', source])
-        argv.append(words)
+        # End of options: search words are a positional query, never CLI flags
+        # (QCommandLineParser treats everything after `--` as positional).
+        argv.extend(['--', words])
     elif name == 'list_frames':
         argv = ['list', '--dir', archive]
         time_flag(arguments, 'since', argv)
