@@ -3,8 +3,10 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QPainter>
 #include <QTemporaryDir>
+#include <QStringList>
 #include <sqlite3.h>
 #include <iostream>
 #include <stdexcept>
@@ -193,7 +195,21 @@ void publicationAndSourceGuard(const QString &root) {
     require(count(guarded, "ocr_reuse_hits") == 1, "changed source was not re-decoded on retry");
 }
 
-void configuredLanguages(const QString &root) {
+bool traineddataInstalled(const QString &language) {
+    // Mirror Tesseract's Init(nullptr) resolution: TESSDATA_PREFIX (as the
+    // tessdata dir itself, or its parent), then the common packaged datadirs.
+    const QString file = language + ".traineddata";
+    const QString prefix = qEnvironmentVariable("TESSDATA_PREFIX");
+    QStringList dirs;
+    if (!prefix.isEmpty()) dirs << prefix << prefix + "/tessdata";
+    dirs << QStringLiteral("/usr/share/tessdata") << QStringLiteral("/usr/share/tesseract-ocr/5/tessdata")
+         << QStringLiteral("/usr/local/share/tessdata");
+    for (const QString &dir : dirs)
+        if (QFileInfo(QDir(dir).filePath(file)).isFile()) return true;
+    return false;
+}
+
+bool configuredLanguages(const QString &root) {
     const QString directory = root + "/languages";
     QImage french(960, 540, QImage::Format_RGBA8888);
     french.fill(Qt::white);
@@ -205,6 +221,17 @@ void configuredLanguages(const QString &root) {
     }
     record(directory, {french, frame(2), french, frame(2)});
     auto frenchOpts = options(directory); frenchOpts.ocrLanguages = "eng+fra";
+    auto invalid = options(directory); invalid.ocrLanguages = "eng fre";
+    bool rejected = false;
+    try { replay::Indexer bad(invalid); } catch (const std::exception &) { rejected = true; }
+    require(rejected, "invalid OCR language set was accepted");
+    // The eng+fra scenario needs fra.traineddata, which the README does not
+    // require. Skip (exit 77) instead of failing; the eng-only checks above
+    // and elsewhere still run.
+    if (!traineddataInstalled("fra")) {
+        std::cout << "SKIP eng+fra reuse scenario: fra.traineddata is not installed; install tesseract-data-fra to exercise it\n";
+        return false;
+    }
     {
         replay::Indexer indexer(frenchOpts);
         ready(indexer); ready(indexer); ready(indexer);
@@ -220,10 +247,7 @@ void configuredLanguages(const QString &root) {
     ready(english);
     require(count(english, "ocr_reuse_hits") == 0 && count(english, "ocr_full_frames") == 1,
             "eng reused a cached eng+fra result");
-    auto invalid = options(directory); invalid.ocrLanguages = "eng fre";
-    bool rejected = false;
-    try { replay::Indexer bad(invalid); } catch (const std::exception &) { rejected = true; }
-    require(rejected, "invalid OCR language set was accepted");
+    return true;
 }
 
 void busyPublicationStaysPending(const QString &root) {
@@ -266,8 +290,8 @@ int main(int argc, char **argv) {
         returnsAndRestart(temporary.path()); priorityAndProfile(temporary.path());
         exactPixelsAndPartialProvenance(temporary.path()); invalidationAndBound(temporary.path());
         publicationAndSourceGuard(temporary.path());
-        configuredLanguages(temporary.path());
         busyPublicationStaysPending(temporary.path());
+        if (!configuredLanguages(temporary.path())) return 77; // eng+fra skipped: fra.traineddata missing
         std::cout << "PASS exact whole-frame OCR reuse, durable provenance, invalidation and atomic publication\n";
         return 0;
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }

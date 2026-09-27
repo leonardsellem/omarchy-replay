@@ -166,7 +166,8 @@ QJsonObject checkedPolicy(const QJsonObject &source) {
         if (path.isEmpty()) fail("Saved OCR model is unavailable.");
         for (const QString &language : result["ocr_langs"].toString().split('+')) {
             const QFileInfo file(QDir(path).filePath(language + ".traineddata"));
-            if (!file.isFile() || !file.isReadable() || file.size() == 0) fail("Saved OCR model is unavailable.");
+            if (!file.isFile() || !file.isReadable() || file.size() == 0)
+                fail(QString("Saved OCR model must contain a readable, nonempty %1.traineddata file").arg(language));
         }
         result["ocr_data_path"] = path;
     }
