@@ -286,9 +286,13 @@ def compact_search(result, detail):
                     meeting['transcript'] = meeting['transcript'][:DEFAULT_TEXT_CHARS]
             # Bound the meetings envelope BEFORE paging results, so meetings can
             # never starve the screen page out of its own budget share: when
-            # screen results exist they are guaranteed half the budget.
+            # screen results exist they are guaranteed half the budget. The
+            # tail keys the emitted page will carry are pre-counted so the trim
+            # does not under-measure by the tail's own bytes.
             empty = dict(result)
             empty['results'] = []
+            empty['truncated'] = True
+            empty['next_offset'] = 0
             reserve = RESPONSE_BUDGET // 2 if result.get('results') else RESPONSE_BUDGET
             while meetings and len(json.dumps(empty)) > reserve:
                 meetings.pop()
@@ -310,6 +314,19 @@ def compact_search(result, detail):
     result['results'] = kept
     result['truncated'] = truncated or result.get('truncated') is True
     result['next_offset'] = next_offset
+    if detail != 'full':
+        # Final measurement on the complete emitted response: the last word on
+        # the budget (covers tail digits and any estimate drift).
+        if isinstance(meetings, list):
+            while meetings and len(json.dumps(result)) > RESPONSE_BUDGET:
+                meetings.pop()
+                result['truncated'] = True
+        while len(json.dumps(result)) > RESPONSE_BUDGET and result['results']:
+            dropped = result['results'].pop()
+            result['truncated'] = True
+            remaining = sum(item.get('count', 1) for item in result['results'])
+            result['next_offset'] = (result.get('offset') or 0) + \
+                (remaining or dropped.get('count', 1))
     return result
 
 

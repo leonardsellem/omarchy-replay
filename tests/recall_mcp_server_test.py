@@ -221,6 +221,17 @@ def main():
         cutm2 = adapter.compact_search(meetings_heavy, 'compact')
         assert len(json.dumps(cutm2)) <= adapter.RESPONSE_BUDGET, len(json.dumps(cutm2))
         assert cutm2['truncated'] is True, cutm2
+        # Meetings-only page at the CLI-faithful entry shape, at the measured
+        # boundary (108 entries emitted 60,041 bytes on the pre-tail-measure
+        # adapter): the emitted page must fit including its tail keys.
+        meetings_only = {'total_matches': 0, 'offset': 0, 'results': [], 'meetings': [
+            {'id': i, 'title': f'Meeting {i}', 'started_at_ms': 1_700_000_000_000 + i,
+             'time_known': True, 'duration_seconds': 1800 + i,
+             'matching_passages': ['passage ' * 12],
+             'transcript': 'transcript ' * 40}
+            for i in range(108)]}
+        cutm3 = adapter.compact_search(meetings_only, 'compact')
+        assert len(json.dumps(cutm3)) <= adapter.RESPONSE_BUDGET, len(json.dumps(cutm3))
 
         unknown_tool = server.call({'jsonrpc': '2.0', 'id': 9, 'method': 'tools/call', 'params': {
             'name': 'nope', 'arguments': {}}})
