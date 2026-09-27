@@ -175,22 +175,52 @@ def main():
         assert all(len(item['text']) <= adapter.DEFAULT_TEXT_CHARS
                    for item in compact_search_payload['results']), compact_search_payload
 
-        # P2 fixes (Jude run-r1): the budget must hold by MEASUREMENT, not
-        # estimate — near-boundary items and the meetings envelope included.
-        # 300-char distinct texts reproduce the 101-item 60,076-byte overshoot.
-        boundary = {'total_matches': 300, 'offset': 0, 'meetings': [], 'results': [
+        # P2/P3 follow-ups (Jude run-p2fix-r1): discriminating boundary shapes,
+        # meetings starvation, non-advancing coordinates, and the real tail.
+        # search items of 154 text chars measured 60,179 on the pre-fix adapter
+        # (over budget) and measure in on the fixed one; list items of 125
+        # measured 60,172 on the pre-fix adapter.
+        boundary_search = {'total_matches': 300, 'offset': 0, 'meetings': [], 'results': [
             {'id': i, 'timestamp': 'T', 'timestamp_ms': i, 'ocr_state': 'ready',
-             'text': f'uniq {i} ' + 'q' * 290}
+             'text': f'uniq {i} ' + 'q' * 144}
             for i in range(300)]}
-        cut = adapter.compact_search(boundary, 'compact')
+        cut = adapter.compact_search(boundary_search, 'compact')
         assert len(json.dumps(cut)) <= adapter.RESPONSE_BUDGET, len(json.dumps(cut))
+        boundary_list = adapter.compact_list(
+            [{'id': i, 'timestamp': 'T', 'timestamp_ms': i, 'ocr_state': 'ready',
+              'text': f'uniq {i} ' + 'r' * 115} for i in range(300)], '/arc', 'compact', 0)
+        assert len(json.dumps(boundary_list)) <= adapter.RESPONSE_BUDGET
+        # Meetings must never starve screen results: half the budget is reserved.
+        mixed = {'total_matches': 300, 'offset': 0, 'meetings': [
+            {'id': i, 'title': f'm{i}', 'matching_passages': ['p' * 120],
+             'transcript': 't' * adapter.DEFAULT_TEXT_CHARS}
+            for i in range(200)], 'results': [
+            {'id': 10_000 + i, 'timestamp': 'T', 'timestamp_ms': i, 'ocr_state': 'ready',
+             'text': f'uniq screen {i} ' + 's' * 150}
+            for i in range(300)]}
+        cutm = adapter.compact_search(mixed, 'compact')
+        assert len(json.dumps(cutm)) <= adapter.RESPONSE_BUDGET, len(json.dumps(cutm))
+        assert cutm['results'] and cutm['truncated'] is True, cutm
+        # A single unpageable FULL-detail item must still advance the resume
+        # coordinate (compact items are text-capped at 400 and always fit).
+        unpageable = {'total_matches': 1, 'offset': 40, 'meetings': [], 'results': [
+            {'id': 7, 'timestamp': 'T', 'timestamp_ms': 7, 'ocr_state': 'ready',
+             'text': 'z' * (adapter.RESPONSE_BUDGET * 2)}]}
+        cutu = adapter.compact_search(unpageable, 'full')
+        assert cutu['results'] == [] and cutu['next_offset'] == 41 and \
+            cutu['truncated'] is True, cutu
+        # A deep offset makes the tail digits wide; the emitted page still fits.
+        deep = adapter.compact_list(
+            [{'id': i, 'timestamp': 'T', 'timestamp_ms': i, 'ocr_state': 'ready',
+              'text': f'uniq {i} ' + 'w' * 178} for i in range(300)], '/arc', 'compact', 123456789)
+        assert len(json.dumps(deep)) <= adapter.RESPONSE_BUDGET, len(json.dumps(deep))
         meetings_heavy = {'total_matches': 1, 'offset': 0, 'results': [], 'meetings': [
             {'id': i, 'title': f'm{i}', 'matching_passages': ['p' * 120],
              'transcript': 't' * adapter.DEFAULT_TEXT_CHARS}
             for i in range(300)]}
-        cutm = adapter.compact_search(meetings_heavy, 'compact')
-        assert len(json.dumps(cutm)) <= adapter.RESPONSE_BUDGET, len(json.dumps(cutm))
-        assert cutm['truncated'] is True, cutm
+        cutm2 = adapter.compact_search(meetings_heavy, 'compact')
+        assert len(json.dumps(cutm2)) <= adapter.RESPONSE_BUDGET, len(json.dumps(cutm2))
+        assert cutm2['truncated'] is True, cutm2
 
         unknown_tool = server.call({'jsonrpc': '2.0', 'id': 9, 'method': 'tools/call', 'params': {
             'name': 'nope', 'arguments': {}}})
