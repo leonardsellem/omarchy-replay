@@ -175,6 +175,23 @@ def main():
         assert all(len(item['text']) <= adapter.DEFAULT_TEXT_CHARS
                    for item in compact_search_payload['results']), compact_search_payload
 
+        # P2 fixes (Jude run-r1): the budget must hold by MEASUREMENT, not
+        # estimate — near-boundary items and the meetings envelope included.
+        # 300-char distinct texts reproduce the 101-item 60,076-byte overshoot.
+        boundary = {'total_matches': 300, 'offset': 0, 'meetings': [], 'results': [
+            {'id': i, 'timestamp': 'T', 'timestamp_ms': i, 'ocr_state': 'ready',
+             'text': f'uniq {i} ' + 'q' * 290}
+            for i in range(300)]}
+        cut = adapter.compact_search(boundary, 'compact')
+        assert len(json.dumps(cut)) <= adapter.RESPONSE_BUDGET, len(json.dumps(cut))
+        meetings_heavy = {'total_matches': 1, 'offset': 0, 'results': [], 'meetings': [
+            {'id': i, 'title': f'm{i}', 'matching_passages': ['p' * 120],
+             'transcript': 't' * adapter.DEFAULT_TEXT_CHARS}
+            for i in range(300)]}
+        cutm = adapter.compact_search(meetings_heavy, 'compact')
+        assert len(json.dumps(cutm)) <= adapter.RESPONSE_BUDGET, len(json.dumps(cutm))
+        assert cutm['truncated'] is True, cutm
+
         unknown_tool = server.call({'jsonrpc': '2.0', 'id': 9, 'method': 'tools/call', 'params': {
             'name': 'nope', 'arguments': {}}})
         assert unknown_tool['result']['isError'] is True, unknown_tool

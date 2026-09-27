@@ -239,16 +239,21 @@ def collapse_frames(frames, text_chars=DEFAULT_TEXT_CHARS):
     return items
 
 
-def page_within_budget(items, base_bytes, offset):
-    """Keep items until the serialised page would exceed the byte budget; report the resume offset."""
+def page_within_budget(items, make_page, offset):
+    """Keep items until the MEASURED page would exceed the byte budget; report the resume offset."""
     kept = []
-    used = base_bytes
+    used = base_bytes = len(json.dumps(make_page(kept)))
     for item in items:
-        size = len(json.dumps(item)) + 1
+        size = len(json.dumps(item)) + 2  # the ", " separator between items
         if kept and used + size > RESPONSE_BUDGET:
             break
         used += size
         kept.append(item)
+    # JSON escaping can beat the per-item estimate; cut by measurement until it fits.
+    page = make_page(kept)
+    while kept and len(json.dumps(page)) > RESPONSE_BUDGET:
+        kept.pop()
+        page = make_page(kept)
     truncated = len(kept) < len(items)
     consumed = sum(item.get('count', 1) for item in kept)
     return kept, truncated, (offset + consumed if truncated else None)
@@ -262,26 +267,44 @@ def compact_search(result, detail):
         items = collapse_frames(result.get('results') or [])
     else:
         items = list(result.get('results') or [])
-    base = {key: value for key, value in result.items() if key != 'results'}
-    base['results'] = []
+
+    def make_page(kept):
+        page = {key: value for key, value in result.items()
+                if key not in ('results', 'truncated', 'next_offset')}
+        page['results'] = kept
+        page['truncated'] = False
+        page['next_offset'] = None
+        return page
+
     kept, truncated, next_offset = page_within_budget(
-        items, len(json.dumps(base)) + 2, result.get('offset') or 0)
+        items, make_page, result.get('offset') or 0)
     result['results'] = kept
     result['truncated'] = truncated
     result['next_offset'] = next_offset
+    if detail != 'full':
+        # The meetings envelope shares the budget: drop trailing meetings until
+        # the whole response measures in (the transcript cap above is not enough
+        # for hundreds of meetings). A dropped meeting sets the same flag.
+        meetings = result.get('meetings')
+        if isinstance(meetings, list):
+            while meetings and len(json.dumps(result)) > RESPONSE_BUDGET:
+                meetings.pop()
+                result['truncated'] = True
     return result
 
 
 def compact_list(raw, archive, detail, offset):
     items = list(raw) if detail == 'full' else collapse_frames(raw)
-    base = {'archive': archive, 'schema_version': 2, 'frames': [],
-            'truncated': False, 'next_offset': None}
-    kept, truncated, next_offset = page_within_budget(
-        items, len(json.dumps(base)) + 2, offset)
-    base['frames'] = kept
-    base['truncated'] = truncated
-    base['next_offset'] = next_offset
-    return base
+
+    def make_page(kept):
+        return {'archive': archive, 'schema_version': 2, 'frames': kept,
+                'truncated': False, 'next_offset': None}
+
+    kept, truncated, next_offset = page_within_budget(items, make_page, offset)
+    page = make_page(kept)
+    page['truncated'] = truncated
+    page['next_offset'] = next_offset
+    return page
 
 
 def compact_moment(result, detail, budget=RESPONSE_BUDGET):
