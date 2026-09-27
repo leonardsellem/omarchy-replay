@@ -40,9 +40,9 @@ def main():
         started = datetime.now(timezone.utc)
         dataset = Path(temporary) / 'archive'
         # Fictional synthetic workload only; no real screen content is involved.
-        subprocess.run([BIN, 'demo', '--dir', str(dataset), '--frames', '8', '--interval', '.25',
+        subprocess.run([BIN, 'demo', '--dir', str(dataset), '--frames', '200', '--interval', '.25',
                         '--width', '960', '--height', '540', '--max-mib', '64'],
-                       env=ENV, capture_output=True, text=True, timeout=120)
+                       env=ENV, capture_output=True, text=True, timeout=600)
         assert (dataset / 'ground-truth.json').exists(), 'demo archive was not created'
 
         server = Server(dataset)
@@ -61,7 +61,8 @@ def main():
         assert search['result']['isError'] is False, search
         payload = json.loads(search['result']['content'][0]['text'])
         assert payload['total_matches'] >= 1 and payload['results'], payload
-        first_id = payload['results'][0]['id']
+        first_id = payload['results'][0]['first_id']
+        assert first_id == payload['results'][0]['last_id'], payload
 
         moment = server.call({'jsonrpc': '2.0', 'id': 4, 'method': 'tools/call', 'params': {
             'name': 'get_moment', 'arguments': {'id': first_id, 'context_seconds': 5}}})
@@ -79,7 +80,8 @@ def main():
             'name': 'list_frames', 'arguments': {
                 'since': (started - timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ'), 'limit': 3}}})
         browse_payload = json.loads(browsed['result']['content'][0]['text'])
-        assert isinstance(browse_payload, list) and browse_payload, browse_payload
+        assert isinstance(browse_payload, dict) and browse_payload['frames'], browse_payload
+        assert browse_payload['truncated'] in (True, False), browse_payload
 
         # A bad argument is an MCP tool error, not a crash; the server stays alive.
         bad = server.call({'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call', 'params': {
@@ -96,6 +98,82 @@ def main():
             'name': 'search', 'arguments': {'words': '--out'}}})
         assert option_word['result']['isError'] is False, option_word
         assert 'total_matches' in json.loads(option_word['result']['content'][0]['text']), option_word
+
+        # U1: compact, collapsed, budgeted responses (LS-3291).
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import replay_mcp as adapter
+
+        # Clock-masked collapse: frames differing only in clock digits or
+        # whitespace merge into one run; body-text differences stay separate.
+        runs = adapter.collapse_frames([
+            {'id': 1, 'timestamp_ms': 1000, 'timestamp': '2026-09-27T09:21:00.000Z', 'ocr_state': 'ready',
+             'text': 'deploy 08:01:02 finished'},
+            {'id': 2, 'timestamp_ms': 6000, 'timestamp': '2026-09-27T09:21:05.000Z', 'ocr_state': 'ready',
+             'text': 'deploy 08:01:07 finished'},
+            {'id': 3, 'timestamp_ms': 11000, 'timestamp': '2026-09-27T09:21:10.000Z', 'ocr_state': 'ready',
+             'text': 'deploy  08:02:00  finished'},
+            {'id': 4, 'timestamp_ms': 16000, 'timestamp': '2026-09-27T09:21:15.000Z', 'ocr_state': 'ready',
+             'text': 'deploy finished'},
+            {'id': 5, 'timestamp_ms': 21000, 'timestamp': '2026-09-27T09:21:20.000Z', 'ocr_state': 'ready',
+             'text': 'invoice 12:05 sent'},
+        ], adapter.DEFAULT_TEXT_CHARS)
+        assert [(item['first_id'], item['last_id'], item['count']) for item in runs] == \
+            [(1, 3, 3), (4, 4, 1), (5, 5, 1)], runs
+        long_frame = {'id': 9, 'timestamp_ms': 9000, 'timestamp': '2026-09-27T09:22:00.000Z',
+                      'ocr_state': 'ready', 'text': 'x' * 1000}
+        assert len(adapter.collapse_frames([long_frame], adapter.DEFAULT_TEXT_CHARS)[0]['text']) \
+            == adapter.DEFAULT_TEXT_CHARS
+
+        # A 200-frame demo page must be compact, collapsed and within budget.
+        big = server.call({'jsonrpc': '2.0', 'id': 20, 'method': 'tools/call', 'params': {
+            'name': 'list_frames', 'arguments': {'limit': 200}}})
+        big_payload = json.loads(big['result']['content'][0]['text'])
+        assert isinstance(big_payload, dict) and big_payload['frames'], big_payload
+        assert len(json.dumps(big_payload)) <= adapter.RESPONSE_BUDGET, \
+            f'page exceeds budget: {len(json.dumps(big_payload))}'
+        assert all(item['count'] >= 1 and item['first_id'] <= item['last_id']
+                   for item in big_payload['frames']), big_payload['frames'][:3]
+        # Frames whose body text differs stay separate items (the recorder already
+        # coalesces exact duplicates, so clock-only runs are covered by the
+        # collapse_frames unit test above).
+        assert len({item['text'] for item in big_payload['frames']}) >= 2, big_payload['frames'][:3]
+        assert all('text' not in item or len(item['text']) <= adapter.DEFAULT_TEXT_CHARS
+                   for item in big_payload['frames'])
+        if big_payload['truncated']:
+            assert isinstance(big_payload['next_offset'], int) and big_payload['next_offset'] > 0
+        # A resumed page must advance past the kept frames.
+        if big_payload['truncated']:
+            more = server.call({'jsonrpc': '2.0', 'id': 21, 'method': 'tools/call', 'params': {
+                'name': 'list_frames', 'arguments': {'limit': 200, 'offset': big_payload['next_offset']}}})
+            more_payload = json.loads(more['result']['content'][0]['text'])
+            kept_ids = {item['first_id'] for item in big_payload['frames']}
+            assert more_payload['frames'] and \
+                all(item['first_id'] not in kept_ids for item in more_payload['frames']), more_payload
+
+        # Compact get_moment: no geometry, neighbours as ids and times only;
+        # detail=full keeps the stored lines.
+        compact_moment = server.call({'jsonrpc': '2.0', 'id': 22, 'method': 'tools/call', 'params': {
+            'name': 'get_moment', 'arguments': {'id': first_id, 'context_seconds': 5}}})
+        compact_moment_payload = json.loads(compact_moment['result']['content'][0]['text'])
+        assert compact_moment_payload['moment']['id'] == first_id, compact_moment_payload
+        assert compact_moment_payload['moment']['text'], compact_moment_payload
+        assert compact_moment_payload['moment']['image_path'], compact_moment_payload
+        assert 'lines' not in compact_moment_payload['moment'], compact_moment_payload
+        assert compact_moment_payload['neighbors'] and \
+            all(set(n) <= {'id', 'timestamp', 'timestamp_ms'} for n in compact_moment_payload['neighbors']), \
+            compact_moment_payload['neighbors'][:2]
+        full_moment = server.call({'jsonrpc': '2.0', 'id': 23, 'method': 'tools/call', 'params': {
+            'name': 'get_moment', 'arguments': {'id': first_id, 'context_seconds': 5, 'detail': 'full'}}})
+        full_moment_payload = json.loads(full_moment['result']['content'][0]['text'])
+        assert full_moment_payload['moment'].get('lines'), full_moment_payload
+
+        # Compact search keeps the page metadata and bounds item text.
+        compact_search = server.call({'jsonrpc': '2.0', 'id': 24, 'method': 'tools/call', 'params': {
+            'name': 'search', 'arguments': {'words': 'Patrick', 'limit': 50}}})
+        compact_search_payload = json.loads(compact_search['result']['content'][0]['text'])
+        assert compact_search_payload['total_matches'] >= 1, compact_search_payload
+        assert all(len(item['text']) <= adapter.DEFAULT_TEXT_CHARS
+                   for item in compact_search_payload['results']), compact_search_payload
 
         unknown_tool = server.call({'jsonrpc': '2.0', 'id': 9, 'method': 'tools/call', 'params': {
             'name': 'nope', 'arguments': {}}})
