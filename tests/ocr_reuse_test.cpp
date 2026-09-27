@@ -196,14 +196,16 @@ void publicationAndSourceGuard(const QString &root) {
 }
 
 bool traineddataInstalled(const QString &language) {
-    // Mirror Tesseract's Init(nullptr) resolution: TESSDATA_PREFIX (as the
-    // tessdata dir itself, or its parent), then the common packaged datadirs.
+    // Mirror Tesseract's Init(nullptr) resolution: when TESSDATA_PREFIX is
+    // set it is used exclusively (as the tessdata dir itself or its parent);
+    // only without it does Tesseract fall back to the packaged datadirs.
     const QString file = language + ".traineddata";
     const QString prefix = qEnvironmentVariable("TESSDATA_PREFIX");
     QStringList dirs;
     if (!prefix.isEmpty()) dirs << prefix << prefix + "/tessdata";
-    dirs << QStringLiteral("/usr/share/tessdata") << QStringLiteral("/usr/share/tesseract-ocr/5/tessdata")
-         << QStringLiteral("/usr/local/share/tessdata");
+    else dirs << QStringLiteral("/usr/share/tessdata")
+              << QStringLiteral("/usr/share/tesseract-ocr/5/tessdata")
+              << QStringLiteral("/usr/local/share/tessdata");
     for (const QString &dir : dirs)
         if (QFileInfo(QDir(dir).filePath(file)).isFile()) return true;
     return false;
