@@ -64,7 +64,7 @@ def main():
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             # Wait for actual acceptance before interrupting another OCR unit.
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + 15
             accepted = False
             while time.monotonic() < deadline and recorder.poll() is None:
                 try:
