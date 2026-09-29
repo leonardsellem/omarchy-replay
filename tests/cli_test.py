@@ -60,11 +60,12 @@ def main():
         dataset = Path(temporary)/'dataset'
         recorder = subprocess.Popen([BIN, 'demo', '--realtime', '--workload', 'editing', '--frames', '100',
                                      '--interval', '.25', '--codec', 'h264',
-                                     '--ocr-cpu-percent', '5', '--dir', str(dataset)], env=ENV,
+                                     '--ocr-cpu-percent', '5', '--ocr-max-wall-ms', '30000',
+                                     '--dir', str(dataset)], env=ENV,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             # Wait for actual acceptance before interrupting another OCR unit.
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + 40
             accepted = False
             while time.monotonic() < deadline and recorder.poll() is None:
                 try:

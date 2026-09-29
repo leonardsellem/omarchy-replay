@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [local/xps, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    # Omarchy Replay targets Arch/Omarchy, and the Arch toolchain matches the
+    # test laptop (qt6-base 6.11). Ubuntu 24.04's Qt 6.4 cannot compile
+    # src/main.cpp (QTimeZone::UTC needs Qt >= 6.5).
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 45
+    steps:
+      # The Arch image ships no git; actions/checkout needs it present.
+      - name: Install git
+        run: pacman -Sy --noconfirm --needed git
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm --needed \
+            base-devel cmake pkgconf python ninja \
+            qt6-base tomlplusplus tesseract tesseract-data-eng leptonica \
+            sqlite libwebp wayland wayland-protocols ffmpeg ttf-dejavu fontconfig
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
