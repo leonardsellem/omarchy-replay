@@ -1142,6 +1142,11 @@ struct Recorder::Impl : OcrEngine {
     QFile captureLock;
     QProcess encoder;
     QByteArray encoderErrors;
+    // Exit mode of a video encoder that had already exited when the failure
+    // cleanup reaped it (empty when no encoder started, or when the cleanup had
+    // to kill a still-running child).
+    QString lastEncoderExit;
+    bool encoderStarted = false;
     qint64 previousTimestamp = -1, lastFrameId = 0;
     qint64 segmentId = 0, segmentStartMs = 0;
     int segmentCount = 0, segmentWidth = 0, segmentHeight = 0;
@@ -1359,6 +1364,7 @@ struct Recorder::Impl : OcrEngine {
         });
         encoder.start("ffmpeg", args, QIODevice::ReadWrite);
         if (!encoder.waitForStarted(5000)) error("Cannot start FFmpeg: " + encoder.errorString());
+        encoderStarted = true;
     }
 
     void writeVideo(const QImage &image) {
@@ -1661,7 +1667,18 @@ AddFrameResult Recorder::addFrame(const QImage &input, qint64 timestampMs) {
             } catch (...) {} // The durable reservation makes the next recovery safe.
         } else if (!d->options.resume && !unpublishedArchive.isEmpty() && QFile::remove(unpublishedArchive))
             d->sealedMediaBytes -= unpublishedArchiveBytes;
-        if (d->encoder.state() != QProcess::NotRunning) { d->encoder.kill(); d->encoder.waitForFinished(1000); }
+        // A stop can win the race with the encoder's own exit: reap a child that
+        // already exited here so its real exit mode survives the cleanup (this
+        // is what tells a SIGXFSZ kill apart from a clean stop); only a child
+        // still running is killed.
+        if (d->encoderStarted) {
+            if (d->encoder.state() != QProcess::NotRunning) {
+                if (d->encoder.waitForFinished(10)) d->lastEncoderExit = d->encoderExitDetail();
+                else { d->encoder.kill(); d->encoder.waitForFinished(1000); }
+            } else if (d->encoder.error() != QProcess::FailedToStart) {
+                d->lastEncoderExit = d->encoderExitDetail();
+            }
+        }
         throw;
     }
 }
@@ -1712,6 +1729,7 @@ QJsonObject Recorder::statsJSON() const {
             {"allocator_trim_attempts", d->allocatorTrimAttempts}, {"allocator_trim_releases", d->allocatorTrimReleases},
             {"allocator_trim_cpu_ms", d->allocatorTrimCpuMs}, {"allocator_trim_wall_ms", d->allocatorTrimWallMs},
             {"finished", d->finished}, {"failed", d->failed}, {"incomplete_segment", !d->segmentPath.isEmpty()},
+            {"last_encoder_exit", d->lastEncoderExit},
             {"cpu_scope", "recorder process only; FFmpeg child and compositor require external measurement"}};
     d->addExperimentStats(stats);
     return stats;
